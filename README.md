@@ -1,36 +1,161 @@
-cat pcrf_edrs_20261014.csv  | head
-RUN_DATE,EDR_DATE,TIME,MSISDN,TRIGGER_TYPE,SERVICE_NAME,QUOTA_NAME,QUOTA_STATUS,EXPECTED_ORG_QUOTA,EXPECTED_TAX_QUOTA,QUOTA_CONSUMPTION,QUOTA_USAGE,QUOTA_VALUE,ACTUAL_QUOTA_USAGE,SERVICE_EXTENDED_ATT1,SOURCE_FILENAME
-2026-10-14,2026-10-13,18:07:55,0225398535,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_180G,ADSL_Mc_HS_30M_180G_Main,Normal,200,0.02734375,42000615,12597850,209715200,12597850,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-13,22:19:11,035145481,GX_CC_REQUEST_UPDATE,Serv_ADSL_HS_30M_140G,ADSL_HS_30M_140G_Main,Level2,150,0.0,291014579,9457109,157286400,9457109,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-13,19:31:40,0402500348,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_300G,ADSL_Mc_HS_30M_300G_Main,Normal,300,0.0390625,137897314,6298904,314572800,6298904,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-13,22:13:10,0224217416,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_140G,ADSL_Mc_HS_30M_140G_Main,Level1,150,0.0068359375,93501372,3150141,157286400,3150141,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-13,16:14:58,0552148180,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_300G,ADSL_Mc_HS_30M_300G_Main,Level1,300,0.0390625,215377821,6299692,314572800,6299692,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-13,17:00:19,035058981,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_300G,ADSL_Mc_HS_30M_300G_Main,Level1,300,0.0390625,176201511,12605015,314572800,12605015,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-13,23:50:03,0237520637,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_140G,ADSL_Mc_HS_30M_140G_Main,Normal,150,0.0068359375,70606913,9449418,157286400,9449418,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-13,22:53:50,0473281383,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_180G,ADSL_Mc_HS_30M_180G_Main,Level1,200,0.02734375,117466282,13222150,209715200,13222150,4440,DWH_PCRF_Usage_261014_000643_2154
-2026-10-14,2026-10-    this is the file  it  raissed the following error 2026-10-17 00:08:16,875 | INFO | ###########################################################
-2026-10-17 00:08:16,876 | INFO | ###### FREE TRAFFIC MISMATCH for run_date= 20261013 ######
-2026-10-17 00:08:16,876 | INFO | ###########################################################
-2026-10-17 00:08:17,100 | ERROR | free_traffic_mismatch failed for run_date= 20261013 | error= Binder Error: Referenced column "EDR_DATE" not found in FROM clause!
-Candidate bindings: "RUN_DATE", "LOAD_DATE", "SERVICE_EXTENDED_ATT1", "TRIGGER_TYPE", "SERVICE_NAME"
+import os
+import sys
 
-LINE 3:             SELECT EDR_DATE, QUOTA_USAGE, SERVICE_NAME, QUOTA_NAME
-                           ^
-Traceback (most recent call last):
-  File "/project/PLATFORM_INTEGRITY/mismatches_flows/free_trafic.py", line 38, in export_free_traffic
-    con.execute(f"""
-duckdb.duckdb.BinderException: Binder Error: Referenced column "EDR_DATE" not found in FROM clause!
-Candidate bindings: "RUN_DATE", "LOAD_DATE", "SERVICE_EXTENDED_ATT1", "TRIGGER_TYPE", "SERVICE_NAME"
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
+)
+sys.path.insert(0, PROJECT_ROOT)
 
-LINE 3:             SELECT EDR_DATE, QUOTA_USAGE, SERVICE_NAME, QUOTA_NAME
-                           ^
-Traceback (most recent call last):
-  File "/project/PLATFORM_INTEGRITY/mismatches_flows/free_trafic.py", line 123, in <module>
+import duckdb
+import argparse
+from datetime import datetime
+from config.duckdb_connection import duckdb_connection
+from utils.logger import get_logger
+from utils.export_to_oracle import prepare_ctl
+from utils.export_to_oracle import run_sqlldr
+
+
+
+def export_free_traffic(run_date: str, con=None):
+
+    logger = get_logger(
+        flow="free_traffic",
+        log_dir=None,
+        run_date=run_date
+    )
+
+    try:
+        if con is None:
+            con = duckdb_connection()
+
+        logger.info("###########################################################")
+        logger.info(f"###### FREE TRAFFIC MISMATCH for run_date= {run_date} ######")
+        logger.info("###########################################################")
+
+        start_time = datetime.now()
+        pcrf_edrs_dump = f"/RAIDdata/PI/PI_PRJ/exports/pcrf_edrs_*.csv"
+
+        con.execute(f"""
+            CREATE OR REPLACE TABLE pcrf_edrs_src AS
+            SELECT EDR_DATE, QUOTA_USAGE, SERVICE_NAME, QUOTA_NAME
+            FROM read_csv_auto('{pcrf_edrs_dump}', ignore_errors=True)
+        """)
+
+        con.execute(f"""
+            CREATE OR REPLACE TABLE free_traffic AS
+            WITH Total_base AS (
+                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
+                       SUM(QUOTA_USAGE) AS Usage,
+                       'TOTAL' AS TYPE
+                FROM pcrf_edrs_src
+                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
+                GROUP BY TRY_CAST(EDR_DATE AS DATE)
+            ),
+
+            PRE AS (
+                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
+                       SUM(QUOTA_USAGE) AS Usage,
+                       'PRE' AS TYPE
+                FROM pcrf_edrs_src
+                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
+                  AND SERVICE_NAME IN (
+                      'Serv_DSL_Generic_Promo',
+                      'Serv_DSL_Seasonal_Gift',
+                      'Serv_DSL_Double_Quota_Pre',
+                      'Serv_DSL_Compensation_Gift'
+                  )
+                GROUP BY TRY_CAST(EDR_DATE AS DATE)
+            ),
+
+            POST AS (
+                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
+                       SUM(QUOTA_USAGE) AS Usage,
+                       'POST' AS TYPE
+                FROM pcrf_edrs_src
+                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
+                  AND (
+                      QUOTA_NAME IN ('DSL_Compensation_Gift')
+                      OR SERVICE_NAME IN (
+                          'Serv_DSL_DoubleQuota_300GB_POST',
+                          'Serv_DSL_DoubleQuota_600GB_POST',
+                          'Serv_DSL_DoubleQuota_200GB_POST',
+                          'Serv_DSL_GC_Gift_3000G'
+                      )
+                  )
+                GROUP BY TRY_CAST(EDR_DATE AS DATE)
+            )
+
+            SELECT
+                t.EDR_DATE AS "TIME",
+                ROUND(t.Usage / 1024 / 1024 / 1024, 2) AS TOTAL_TB,
+                ROUND(pre.Usage / 1024 / 1024 / 1024, 2) AS PRE_FREE_TRAFFIC_TB,
+                100 - ROUND((t.Usage - pre.Usage) / NULLIF(t.Usage, 0), 4) * 100 AS PRE_PERCENTAGE,
+                ROUND(post.Usage / 1024 / 1024 / 1024, 2) AS POST_FREE_TRAFFIC_TB,
+                100 - ROUND((t.Usage - post.Usage) / NULLIF(t.Usage, 0), 4) * 100 AS POST_PERCENTAGE
+            FROM Total_base t
+            JOIN PRE pre ON t.EDR_DATE = pre.EDR_DATE
+            JOIN POST post ON t.EDR_DATE = post.EDR_DATE
+        """)
+
+        count = con.execute("SELECT COUNT(*) FROM free_traffic").fetchone()[0]
+        logger.info(f"Total processed rows: {count}")
+
+        logger.info(f"Exporting free_traffic{run_date}.csv ..")
+        con.execute(f"""COPY free_traffic TO '/project/PLATFORM_INTEGRITY/exports/free_traffic_{run_date}.csv' (HEADER, DELIMITER ',')""")
+       
+        logger.info(f"Inserting into PI.FREE_TRAFFIC table ..")
+        ctl_file = prepare_ctl("free_traffic", run_date)
+        run_sqlldr("free_traffic",run_date, ctl_file=ctl_file)
+        logger.info(f"Insertion done")
+        
+        
+        end_time = datetime.now() 
+        logger.info(f"free_traffic job finished") 
+        logger.info(f"free_traffic total duration: {end_time - start_time}") 
+    except Exception as e: 
+        logger.exception(f"free_traffic failed for run_date= {run_date} | error= {str(e)}") 
+        raise 
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run_date", required=True)
+    args = parser.parse_args()
     export_free_traffic(run_date=args.run_date)
-  File "/project/PLATFORM_INTEGRITY/mismatches_flows/free_trafic.py", line 38, in export_free_traffic
-    con.execute(f"""
-duckdb.duckdb.BinderException: Binder Error: Referenced column "EDR_DATE" not found in FROM clause!
-Candidate bindings: "RUN_DATE", "LOAD_DATE", "SERVICE_EXTENDED_ATT1", "TRIGGER_TYPE", "SERVICE_NAME"
+   when i run this it keep raise this error   File "/project/PLATFORM_INTEGRITY/utils/export_to_oracle.py", line 163, in run_sqlldr
+    raise RuntimeError(
+RuntimeError: SQLLoader failed. Exit code=1, stdout=
+SQL*Loader: Release 12.2.0.1.0 - Production on Sat Oct 17 00:31:34 2026
 
-LINE 3:             SELECT EDR_DATE, QUOTA_USAGE, SERVICE_NAME, QUOTA_NAME
-""""""ra13,20:26:00,0227194660,GX_CC_REQUEST_UPDATE,Serv_ADSL_Mc_HS_30M_180G,ADSL_Mc_HS_30M_180G_Main,Normal,200,0.02734375,36881961,4204287,209715200,4204287,4440,DWH_PCRF_Usage_261014_000643_2154
+Copyright (c) 1982, 2017, Oracle and/or its affiliates.  All rights reserved.
+
+Path used:      Direct
+
+Table PI.FREE_TRAFFIC_MISMATCH:
+  0 Rows successfully loaded.
+
+Check the log file:
+  /project/PLATFORM_INTEGRITY/load/log/free_traffic_20261013.log
+for more information about the load.
+, stderr=SQL*Loader-500: Unable to open file (/project/PLATFORM_INTEGRITY/exports/free_traffic_20261013.csv)
+SQL*Loader-553: file not found
+SQL*Loader-509: System error: No such file or directory
+SQL*Loader-2026: the load was aborted because SQL Loader cannot continue.
+
+Traceback (most recent call last):
+  File "/project/PLATFORM_INTEGRITY/mismatches_flows/free_traffic.py", line 123, in <module>
+    export_free_traffic(run_date=args.run_date)
+  File "/project/PLATFORM_INTEGRITY/mismatches_flows/free_traffic.py", line 108, in export_free_traffic
+    run_sqlldr("free_traffic",run_date, ctl_file=ctl_file)
+  File "/project/PLATFORM_INTEGRITY/utils/export_to_oracle.py", line 163, in run_sqlldr
+    raise RuntimeError(
+RuntimeError: SQLLoader failed. Exit code=1, stdout=
+SQL*Loader: Release 12.2.0.1.0 - Production on Sat Oct 17 00:31:34 2026
+
+Copyright (c) 1982, 2017, Oracle and/or its affiliates.  All rights reserved.
+
+Path used:      Direct
+
+Table PI.FREE_TRAFFIC_MISMATCH:
+  0 Rows successfully loaded.
+  and i find this file created cat free_traffic_mismatch_20261013.csv
+TIME,TOTAL_TB,PRE_FREE_TRAFFIC_TB,PRE_PERCENTAGE,POST_FREE_TRAFFIC_TB,POST_PERCENTAGE
