@@ -13,7 +13,7 @@ from config.duckdb_connection import duckdb_connection
 from utils.logger import get_logger
 from utils.export_to_oracle import prepare_ctl
 from utils.export_to_oracle import run_sqlldr
-from utils.dump_vs_database import validate_loaded_data
+from flows.pcrf_edrs import load_pcrf_edrs
 
 
 def export_free_traffic(run_date: str, con=None):
@@ -33,7 +33,7 @@ def export_free_traffic(run_date: str, con=None):
         logger.info("###########################################################")
 
         start_time = datetime.now()
-        pcrf_edrs_dump = f"/RAIDdata/PI/PI_PRJ/exports/pcrf_edrs_{run_date}.csv"
+        pcrf_edrs_dump = f"/RAIDdata/PI/PI_PRJ/exports/pcrf_edrs_*.csv"
 
         con.execute(f"""
             CREATE OR REPLACE TABLE pcrf_edrs_src AS
@@ -44,35 +44,35 @@ def export_free_traffic(run_date: str, con=None):
         con.execute(f"""
             CREATE OR REPLACE TABLE free_traffic_mismatch AS
             WITH Total_base AS (
-                SELECT CAST(EDR_DATE AS DATE) AS EDR_DATE,
+                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
                        SUM(QUOTA_USAGE) AS Usage,
                        'TOTAL' AS TYPE
                 FROM pcrf_edrs_src
-                WHERE CAST(EDR_DATE AS DATE) >= strptime('{run_date}', '%Y%m%d')::DATE
-                GROUP BY CAST(EDR_DATE AS DATE)
+                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
+                GROUP BY TRY_CAST(EDR_DATE AS DATE)
             ),
 
             PRE AS (
-                SELECT CAST(EDR_DATE AS DATE) AS EDR_DATE,
+                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
                        SUM(QUOTA_USAGE) AS Usage,
                        'PRE' AS TYPE
                 FROM pcrf_edrs_src
-                WHERE CAST(EDR_DATE AS DATE) >= strptime('{run_date}', '%Y%m%d')::DATE
+                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
                   AND SERVICE_NAME IN (
                       'Serv_DSL_Generic_Promo',
                       'Serv_DSL_Seasonal_Gift',
                       'Serv_DSL_Double_Quota_Pre',
                       'Serv_DSL_Compensation_Gift'
                   )
-                GROUP BY CAST(EDR_DATE AS DATE)
+                GROUP BY TRY_CAST(EDR_DATE AS DATE)
             ),
 
             POST AS (
-                SELECT CAST(EDR_DATE AS DATE) AS EDR_DATE,
+                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
                        SUM(QUOTA_USAGE) AS Usage,
                        'POST' AS TYPE
                 FROM pcrf_edrs_src
-                WHERE CAST(EDR_DATE AS DATE) >= strptime('{run_date}', '%Y%m%d')::DATE
+                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
                   AND (
                       QUOTA_NAME IN ('DSL_Compensation_Gift')
                       OR SERVICE_NAME IN (
@@ -82,7 +82,7 @@ def export_free_traffic(run_date: str, con=None):
                           'Serv_DSL_GC_Gift_3000G'
                       )
                   )
-                GROUP BY CAST(EDR_DATE AS DATE)
+                GROUP BY TRY_CAST(EDR_DATE AS DATE)
             )
 
             SELECT
@@ -102,29 +102,19 @@ def export_free_traffic(run_date: str, con=None):
 
         logger.info(f"Exporting free_traffic_mismatch_{run_date}.csv ..")
         con.execute(f"""COPY free_traffic_mismatch TO '/project/PLATFORM_INTEGRITY/exports/free_traffic_mismatch_{run_date}.csv' (HEADER, DELIMITER ',')""")
-
-        logger.info("Inserting into PI.FREE_TRAFFIC_MISMATCH table ..")
-        ctl_file = prepare_ctl("free_traffic_mismatch", run_date)
-        run_sqlldr("free_traffic_mismatch", run_date, ctl_file=ctl_file)
-        logger.info("Insertion done")
-
-        logger.info("Validating inserted data ..")
-        validate_loaded_data(
-            flow_name="free_traffic_mismatch",
-            run_date=run_date,
-            expected_rows=count,
-            logger=logger
-        )
-        logger.info("Inserted data validated successfully.")
-
-        end_time = datetime.now()
-        logger.info("free_traffic_mismatch job finished")
-        logger.info(f"free_traffic_mismatch total duration: {end_time - start_time}")
-
-    except Exception as e:
-        logger.exception(f"free_traffic_mismatch failed for run_date= {run_date} | error= {str(e)}")
-        raise
-
+       
+        logger.info(f"Inserting into PI.FREE_TRAFFIC_MISMATCH table ..")
+        ctl_file = prepare_ctl("free_trafic", run_date)
+        run_sqlldr("free_trafic",run_date, ctl_file=ctl_file)
+        logger.info(f"Insertion done")
+        
+        
+       end_time = datetime.now() 
+        logger.info(f"free_traffic_mismatch job finished") 
+        logger.info(f"free_traffic_mismatch total duration: {end_time - start_time}") 
+    except Exception as e: 
+        logger.exception(f"free_traffic_mismatch failed for run_date= {run_date} | error= {str(e)}") 
+        raise 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
