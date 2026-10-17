@@ -19,7 +19,7 @@ from utils.export_to_oracle import run_sqlldr
 def export_free_traffic(run_date: str, con=None):
 
     logger = get_logger(
-        flow="free_traffic",
+        flow="free_traffic_mismatch",
         log_dir=None,
         run_date=run_date
     )
@@ -42,7 +42,7 @@ def export_free_traffic(run_date: str, con=None):
         """)
 
         con.execute(f"""
-            CREATE OR REPLACE TABLE free_traffic AS
+            CREATE OR REPLACE TABLE free_traffic_mismatch AS
             WITH Total_base AS (
                 SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
                        SUM(QUOTA_USAGE) AS Usage,
@@ -97,65 +97,48 @@ def export_free_traffic(run_date: str, con=None):
             JOIN POST post ON t.EDR_DATE = post.EDR_DATE
         """)
 
-        count = con.execute("SELECT COUNT(*) FROM free_traffic").fetchone()[0]
+        count = con.execute("SELECT COUNT(*) FROM free_traffic_mismatch").fetchone()[0]
         logger.info(f"Total processed rows: {count}")
 
-        logger.info(f"Exporting free_traffic{run_date}.csv ..")
-        con.execute(f"""COPY free_traffic TO '/project/PLATFORM_INTEGRITY/exports/free_traffic_{run_date}.csv' (HEADER, DELIMITER ',')""")
+        logger.info(f"Exporting free_traffic_mismatch{run_date}.csv ..")
+        con.execute(f"""COPY free_traffic_mismatch TO '/project/PLATFORM_INTEGRITY/exports/free_traffic_mismatch_{run_date}.csv' (HEADER, DELIMITER ',')""")
        
         logger.info(f"Inserting into PI.FREE_TRAFFIC table ..")
-        ctl_file = prepare_ctl("free_traffic", run_date)
-        run_sqlldr("free_traffic",run_date, ctl_file=ctl_file)
+        ctl_file = prepare_ctl("free_traffic_mismatch", run_date)
+        run_sqlldr("free_traffic_mismatch",run_date, ctl_file=ctl_file)
         logger.info(f"Insertion done")
         
         
         end_time = datetime.now() 
-        logger.info(f"free_traffic job finished") 
-        logger.info(f"free_traffic total duration: {end_time - start_time}") 
+        logger.info(f"free_traffic_mismatch job finished") 
+        logger.info(f"free_traffic_mismatch total duration: {end_time - start_time}") 
     except Exception as e: 
-        logger.exception(f"free_traffic failed for run_date= {run_date} | error= {str(e)}") 
+        logger.exception(f"free_traffic_mismatch failed for run_date= {run_date} | error= {str(e)}") 
         raise 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_date", required=True)
     args = parser.parse_args()
-    export_free_traffic(run_date=args.run_date)
-   when i run this it keep raise this error   File "/project/PLATFORM_INTEGRITY/utils/export_to_oracle.py", line 163, in run_sqlldr
-    raise RuntimeError(
-RuntimeError: SQLLoader failed. Exit code=1, stdout=
-SQL*Loader: Release 12.2.0.1.0 - Production on Sat Oct 17 00:31:34 2026
-
-Copyright (c) 1982, 2017, Oracle and/or its affiliates.  All rights reserved.
-
-Path used:      Direct
-
-Table PI.FREE_TRAFFIC_MISMATCH:
-  0 Rows successfully loaded.
-
-Check the log file:
-  /project/PLATFORM_INTEGRITY/load/log/free_traffic_20261013.log
-for more information about the load.
-, stderr=SQL*Loader-500: Unable to open file (/project/PLATFORM_INTEGRITY/exports/free_traffic_20261013.csv)
-SQL*Loader-553: file not found
-SQL*Loader-509: System error: No such file or directory
-SQL*Loader-2026: the load was aborted because SQL Loader cannot continue.
-
-Traceback (most recent call last):
-  File "/project/PLATFORM_INTEGRITY/mismatches_flows/free_traffic.py", line 123, in <module>
-    export_free_traffic(run_date=args.run_date)
-  File "/project/PLATFORM_INTEGRITY/mismatches_flows/free_traffic.py", line 108, in export_free_traffic
-    run_sqlldr("free_traffic",run_date, ctl_file=ctl_file)
-  File "/project/PLATFORM_INTEGRITY/utils/export_to_oracle.py", line 163, in run_sqlldr
-    raise RuntimeError(
-RuntimeError: SQLLoader failed. Exit code=1, stdout=
-SQL*Loader: Release 12.2.0.1.0 - Production on Sat Oct 17 00:31:34 2026
-
-Copyright (c) 1982, 2017, Oracle and/or its affiliates.  All rights reserved.
-
-Path used:      Direct
-
-Table PI.FREE_TRAFFIC_MISMATCH:
-  0 Rows successfully loaded.
-  and i find this file created cat free_traffic_mismatch_20261013.csv
-TIME,TOTAL_TB,PRE_FREE_TRAFFIC_TB,PRE_PERCENTAGE,POST_FREE_TRAFFIC_TB,POST_PERCENTAGE
+    export_free_traffic(run_date=args.run_date)  
+i want to make the below logic for the following script use the INSERT INTO RP7VFEPIDAT.ADSL_Subs
+SELECT RUN_DATE,SERVICE_NAME, count
+FROM
+(SELECT RUN_DATE,PCRF_SERVICE_NAME_EXPECTED  SERVICE_NAME , COUNT(DISTINCT MSISDN) COUNT
+FROM RP7VFEPIDAT.PFM_BSCS_ADSL pba
+WHERE RUN_DATE = TO_CHAR(TO_DATE($1, 'YYYYMMDD') - 1, 'YYYYMMDD')
+AND "TYPE" ='POST'
+AND TMCODE_DES  NOT LIKE 'SDSL%'
+AND TMCODE_DES  NOT LIKE 'Cloud%'
+GROUP BY RUN_DATE,PCRF_SERVICE_NAME_EXPECTED)
+UNION ALL
+SELECT RUN_DATE,SERVICE_NAME, count
+FROM
+(SELECT TO_NUMBER(TO_CHAR(RUN_DATE,'YYYYMMDD')) RUN_DATE,PCRF_SERVICE_ID_EXPECTED SERVICE_NAME,COUNT(DISTINCT MSISDN) COUNT
+FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL rtiah
+WHERE  RUN_DATE = TO_DATE($1,'YYYYMMDD') -1
+AND UPPER(PACKAGE_TYPE) ='MAIN BUNDLE'
+GROUP BY RUN_DATE,PCRF_SERVICE_ID_EXPECTED);
+ ;
+COMMIT;  i will tell u the file names for bscs and in   to read from i want you to change all names to be adsl subs  pah for bscs is "/project/PLATFORM_INTEGRITY/exports/"
+            f"bscs_profiles_adsl_{run_date}.csv""     for charging in_adsl  is "/project/PLATFORM_INTEGRITY/exports/charging_adsl_{run_date}.csv"   if u havemake he script for me 
