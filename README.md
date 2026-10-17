@@ -34,40 +34,36 @@ def export_adsl_subs(run_date: str, con=None):
  
         start_time = datetime.now()
  
-        # The Oracle query works on run_date - 1 day
         prev_date = (datetime.strptime(run_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
         logger.info(f"Counting subscribers for RUN_DATE= {prev_date}")
  
-        bscs_dump = f"/project/PLATFORM_INTEGRITY/exports/bscs_profiles_adsl_{run_date}.csv"
-        charging_dump = f"/project/PLATFORM_INTEGRITY/exports/charging_adsl_{run_date}.csv"
+        bscs_dump = f"/RAIDdata/PI/PI_PRJ/exports/bscs_profiles_adsl_{run_date}*"
+        charging_dump = f"/RAIDdata/PI/PI_PRJ/exports/charging_adsl_{run_date}*"
  
-        for f in (bscs_dump, charging_dump):
-            if not os.path.exists(f):
-                raise FileNotFoundError(f"Source file not found: {f}")
  
-        # all_varchar keeps MSISDN leading zeros and avoids type guessing
+
         con.execute(f"""
             CREATE OR REPLACE TABLE bscs_adsl_src AS
-            SELECT RUN_DATE, PCRF_SERVICE_NAME_EXPECTED, MSISDN, "TYPE", TMCODE_DES
+            SELECT RUN_DATE, PCRF_SERVICE_NAME_EXPECTED, MSISDN, TYPE, TM_CODE_DESC
             FROM read_csv_auto('{bscs_dump}', all_varchar=true, ignore_errors=True)
         """)
  
         con.execute(f"""
             CREATE OR REPLACE TABLE charging_adsl_src AS
-            SELECT RUN_DATE, PCRF_SERVICE_ID_EXPECTED, MSISDN, PACKAGE_TYPE
+            SELECT RUN_DATE, PCRF_SERVICE_NAME as PCRF_SERVICE_ID_EXPECTED , MSISDN, PROD_TYPE_NAME as PACKAGE_TYPE
             FROM read_csv_auto('{charging_dump}', all_varchar=true, ignore_errors=True)
         """)
  
-        # RUN_DATE is normalised to YYYYMMDD (works for 20261012, 2026-10-12 or 2026-10-12 00:00:00)
+
         con.execute(f"""
             CREATE OR REPLACE TABLE adsl_subs AS
             SELECT RUN_DATE, SERVICE_NAME, "COUNT"
             FROM (
-                SELECT CAST(REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') AS BIGINT) AS RUN_DATE,
+                TRY_CAST(RUN_DATE AS DATE) AS RUN_DATE,
                        PCRF_SERVICE_NAME_EXPECTED AS SERVICE_NAME,
                        COUNT(DISTINCT MSISDN) AS "COUNT"
                 FROM bscs_adsl_src
-                WHERE REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') = '{prev_date}'
+                WHERE TRY_CAST(RUN_DATE AS DATE) = strptime('{prev_date}', '%Y%m%d')
                   AND "TYPE" = 'POST'
                   AND TMCODE_DES NOT LIKE 'SDSL%'
                   AND TMCODE_DES NOT LIKE 'Cloud%'
@@ -76,11 +72,11 @@ def export_adsl_subs(run_date: str, con=None):
             UNION ALL
             SELECT RUN_DATE, SERVICE_NAME, "COUNT"
             FROM (
-                SELECT CAST(REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') AS BIGINT) AS RUN_DATE,
+                SELECT TRY_CAST(RUN_DATE AS DATE) AS RUN_DATE,
                        PCRF_SERVICE_ID_EXPECTED AS SERVICE_NAME,
                        COUNT(DISTINCT MSISDN) AS "COUNT"
                 FROM charging_adsl_src
-                WHERE REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') = '{prev_date}'
+                WHERE TRY_CAST(RUN_DATE AS DATE) = strptime('{prev_date}', '%Y%m%d')
                   AND UPPER(PACKAGE_TYPE) = 'MAIN BUNDLE'
                 GROUP BY 1, 2
             )
@@ -114,4 +110,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     export_adsl_subs(run_date=args.run_date)
  
-Claude finished the response
+
