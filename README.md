@@ -1,144 +1,117 @@
+
+Adsl subs · PY
 import os
 import sys
-
+ 
 PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
 )
 sys.path.insert(0, PROJECT_ROOT)
-
-import duckdb
+ 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from config.duckdb_connection import duckdb_connection
 from utils.logger import get_logger
 from utils.export_to_oracle import prepare_ctl
 from utils.export_to_oracle import run_sqlldr
-
-
-
-def export_free_traffic(run_date: str, con=None):
-
+ 
+ 
+def export_adsl_subs(run_date: str, con=None):
+ 
     logger = get_logger(
-        flow="free_traffic_mismatch",
+        flow="adsl_subs",
         log_dir=None,
         run_date=run_date
     )
-
+ 
     try:
         if con is None:
             con = duckdb_connection()
-
+ 
         logger.info("###########################################################")
-        logger.info(f"###### FREE TRAFFIC MISMATCH for run_date= {run_date} ######")
+        logger.info(f"###### ADSL SUBS for run_date= {run_date} ######")
         logger.info("###########################################################")
-
+ 
         start_time = datetime.now()
-        pcrf_edrs_dump = f"/RAIDdata/PI/PI_PRJ/exports/pcrf_edrs_*.csv"
-
+ 
+        # The Oracle query works on run_date - 1 day
+        prev_date = (datetime.strptime(run_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+        logger.info(f"Counting subscribers for RUN_DATE= {prev_date}")
+ 
+        bscs_dump = f"/project/PLATFORM_INTEGRITY/exports/bscs_profiles_adsl_{run_date}.csv"
+        charging_dump = f"/project/PLATFORM_INTEGRITY/exports/charging_adsl_{run_date}.csv"
+ 
+        for f in (bscs_dump, charging_dump):
+            if not os.path.exists(f):
+                raise FileNotFoundError(f"Source file not found: {f}")
+ 
+        # all_varchar keeps MSISDN leading zeros and avoids type guessing
         con.execute(f"""
-            CREATE OR REPLACE TABLE pcrf_edrs_src AS
-            SELECT EDR_DATE, QUOTA_USAGE, SERVICE_NAME, QUOTA_NAME
-            FROM read_csv_auto('{pcrf_edrs_dump}', ignore_errors=True)
+            CREATE OR REPLACE TABLE bscs_adsl_src AS
+            SELECT RUN_DATE, PCRF_SERVICE_NAME_EXPECTED, MSISDN, "TYPE", TMCODE_DES
+            FROM read_csv_auto('{bscs_dump}', all_varchar=true, ignore_errors=True)
         """)
-
+ 
         con.execute(f"""
-            CREATE OR REPLACE TABLE free_traffic_mismatch AS
-            WITH Total_base AS (
-                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
-                       SUM(QUOTA_USAGE) AS Usage,
-                       'TOTAL' AS TYPE
-                FROM pcrf_edrs_src
-                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
-                GROUP BY TRY_CAST(EDR_DATE AS DATE)
-            ),
-
-            PRE AS (
-                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
-                       SUM(QUOTA_USAGE) AS Usage,
-                       'PRE' AS TYPE
-                FROM pcrf_edrs_src
-                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
-                  AND SERVICE_NAME IN (
-                      'Serv_DSL_Generic_Promo',
-                      'Serv_DSL_Seasonal_Gift',
-                      'Serv_DSL_Double_Quota_Pre',
-                      'Serv_DSL_Compensation_Gift'
-                  )
-                GROUP BY TRY_CAST(EDR_DATE AS DATE)
-            ),
-
-            POST AS (
-                SELECT TRY_CAST(EDR_DATE AS DATE) AS EDR_DATE,
-                       SUM(QUOTA_USAGE) AS Usage,
-                       'POST' AS TYPE
-                FROM pcrf_edrs_src
-                WHERE TRY_CAST(EDR_DATE AS DATE) = strptime('{run_date}', '%Y%m%d')
-                  AND (
-                      QUOTA_NAME IN ('DSL_Compensation_Gift')
-                      OR SERVICE_NAME IN (
-                          'Serv_DSL_DoubleQuota_300GB_POST',
-                          'Serv_DSL_DoubleQuota_600GB_POST',
-                          'Serv_DSL_DoubleQuota_200GB_POST',
-                          'Serv_DSL_GC_Gift_3000G'
-                      )
-                  )
-                GROUP BY TRY_CAST(EDR_DATE AS DATE)
+            CREATE OR REPLACE TABLE charging_adsl_src AS
+            SELECT RUN_DATE, PCRF_SERVICE_ID_EXPECTED, MSISDN, PACKAGE_TYPE
+            FROM read_csv_auto('{charging_dump}', all_varchar=true, ignore_errors=True)
+        """)
+ 
+        # RUN_DATE is normalised to YYYYMMDD (works for 20261012, 2026-10-12 or 2026-10-12 00:00:00)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE adsl_subs AS
+            SELECT RUN_DATE, SERVICE_NAME, "COUNT"
+            FROM (
+                SELECT CAST(REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') AS BIGINT) AS RUN_DATE,
+                       PCRF_SERVICE_NAME_EXPECTED AS SERVICE_NAME,
+                       COUNT(DISTINCT MSISDN) AS "COUNT"
+                FROM bscs_adsl_src
+                WHERE REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') = '{prev_date}'
+                  AND "TYPE" = 'POST'
+                  AND TMCODE_DES NOT LIKE 'SDSL%'
+                  AND TMCODE_DES NOT LIKE 'Cloud%'
+                GROUP BY 1, 2
             )
-
-            SELECT
-                t.EDR_DATE AS "TIME",
-                ROUND(t.Usage / 1024 / 1024 / 1024, 2) AS TOTAL_TB,
-                ROUND(pre.Usage / 1024 / 1024 / 1024, 2) AS PRE_FREE_TRAFFIC_TB,
-                100 - ROUND((t.Usage - pre.Usage) / NULLIF(t.Usage, 0), 4) * 100 AS PRE_PERCENTAGE,
-                ROUND(post.Usage / 1024 / 1024 / 1024, 2) AS POST_FREE_TRAFFIC_TB,
-                100 - ROUND((t.Usage - post.Usage) / NULLIF(t.Usage, 0), 4) * 100 AS POST_PERCENTAGE
-            FROM Total_base t
-            JOIN PRE pre ON t.EDR_DATE = pre.EDR_DATE
-            JOIN POST post ON t.EDR_DATE = post.EDR_DATE
+            UNION ALL
+            SELECT RUN_DATE, SERVICE_NAME, "COUNT"
+            FROM (
+                SELECT CAST(REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') AS BIGINT) AS RUN_DATE,
+                       PCRF_SERVICE_ID_EXPECTED AS SERVICE_NAME,
+                       COUNT(DISTINCT MSISDN) AS "COUNT"
+                FROM charging_adsl_src
+                WHERE REPLACE(SUBSTR(RUN_DATE, 1, 10), '-', '') = '{prev_date}'
+                  AND UPPER(PACKAGE_TYPE) = 'MAIN BUNDLE'
+                GROUP BY 1, 2
+            )
         """)
-
-        count = con.execute("SELECT COUNT(*) FROM free_traffic_mismatch").fetchone()[0]
+ 
+        count = con.execute("SELECT COUNT(*) FROM adsl_subs").fetchone()[0]
         logger.info(f"Total processed rows: {count}")
-
-        logger.info(f"Exporting free_traffic_mismatch{run_date}.csv ..")
-        con.execute(f"""COPY free_traffic_mismatch TO '/project/PLATFORM_INTEGRITY/exports/free_traffic_mismatch_{run_date}.csv' (HEADER, DELIMITER ',')""")
-       
-        logger.info(f"Inserting into PI.FREE_TRAFFIC table ..")
-        ctl_file = prepare_ctl("free_traffic_mismatch", run_date)
-        run_sqlldr("free_traffic_mismatch",run_date, ctl_file=ctl_file)
-        logger.info(f"Insertion done")
-        
-        
-        end_time = datetime.now() 
-        logger.info(f"free_traffic_mismatch job finished") 
-        logger.info(f"free_traffic_mismatch total duration: {end_time - start_time}") 
-    except Exception as e: 
-        logger.exception(f"free_traffic_mismatch failed for run_date= {run_date} | error= {str(e)}") 
-        raise 
-
+ 
+        if count == 0:
+            raise ValueError(f"adsl_subs produced 0 rows for RUN_DATE= {prev_date}; check source files and filters")
+ 
+        logger.info(f"Exporting adsl_subs_{run_date}.csv ..")
+        con.execute(f"""COPY adsl_subs TO '/project/PLATFORM_INTEGRITY/exports/adsl_subs_{run_date}.csv' (HEADER, DELIMITER ',')""")
+ 
+        logger.info("Inserting into RP7VFEPIDAT.ADSL_SUBS table ..")
+        ctl_file = prepare_ctl("adsl_subs", run_date)
+        run_sqlldr("adsl_subs", run_date, ctl_file=ctl_file)
+        logger.info("Insertion done")
+ 
+        end_time = datetime.now()
+        logger.info("adsl_subs job finished")
+        logger.info(f"adsl_subs total duration: {end_time - start_time}")
+    except Exception as e:
+        logger.exception(f"adsl_subs failed for run_date= {run_date} | error= {str(e)}")
+        raise
+ 
+ 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_date", required=True)
     args = parser.parse_args()
-    export_free_traffic(run_date=args.run_date)  
-i want to make the below logic for the following script use the INSERT INTO RP7VFEPIDAT.ADSL_Subs
-SELECT RUN_DATE,SERVICE_NAME, count
-FROM
-(SELECT RUN_DATE,PCRF_SERVICE_NAME_EXPECTED  SERVICE_NAME , COUNT(DISTINCT MSISDN) COUNT
-FROM RP7VFEPIDAT.PFM_BSCS_ADSL pba
-WHERE RUN_DATE = TO_CHAR(TO_DATE($1, 'YYYYMMDD') - 1, 'YYYYMMDD')
-AND "TYPE" ='POST'
-AND TMCODE_DES  NOT LIKE 'SDSL%'
-AND TMCODE_DES  NOT LIKE 'Cloud%'
-GROUP BY RUN_DATE,PCRF_SERVICE_NAME_EXPECTED)
-UNION ALL
-SELECT RUN_DATE,SERVICE_NAME, count
-FROM
-(SELECT TO_NUMBER(TO_CHAR(RUN_DATE,'YYYYMMDD')) RUN_DATE,PCRF_SERVICE_ID_EXPECTED SERVICE_NAME,COUNT(DISTINCT MSISDN) COUNT
-FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL rtiah
-WHERE  RUN_DATE = TO_DATE($1,'YYYYMMDD') -1
-AND UPPER(PACKAGE_TYPE) ='MAIN BUNDLE'
-GROUP BY RUN_DATE,PCRF_SERVICE_ID_EXPECTED);
- ;
-COMMIT;  i will tell u the file names for bscs and in   to read from i want you to change all names to be adsl subs  pah for bscs is "/project/PLATFORM_INTEGRITY/exports/"
-            f"bscs_profiles_adsl_{run_date}.csv""     for charging in_adsl  is "/project/PLATFORM_INTEGRITY/exports/charging_adsl_{run_date}.csv"   if u havemake he script for me 
+    export_adsl_subs(run_date=args.run_date)
+ 
+Claude finished the response
