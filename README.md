@@ -1,5 +1,3 @@
-
-Adsl subs · PY
 import os
 import sys
  
@@ -109,5 +107,3 @@ if __name__ == "__main__":
     parser.add_argument("--run_date", required=True)
     args = parser.parse_args()
     export_adsl_subs(run_date=args.run_date)
- 
-
