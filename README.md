@@ -6,13 +6,14 @@ WITH params AS (
 ),
 
 cycles AS (
+    -- bc = bill cycle, e = END day of cycle (31 = last day of month)
     SELECT '01' AS bc, 31 AS e FROM dual UNION ALL
-    SELECT '02',       15      FROM dual UNION ALL
-    SELECT '04',        3      FROM dual UNION ALL
-    SELECT '07',        6      FROM dual UNION ALL
-    SELECT '09',       20      FROM dual UNION ALL
-    SELECT '11',       10      FROM dual UNION ALL
-    SELECT '25',       24      FROM dual
+    SELECT '02',       15      FROM dual UNION ALL   -- 16 -> 15
+    SELECT '04',        3      FROM dual UNION ALL   -- 4  -> 3
+    SELECT '07',        6      FROM dual UNION ALL   -- 7  -> 6
+    SELECT '09',       20      FROM dual UNION ALL   -- 21 -> 20 (to be confirmed)
+    SELECT '11',       10      FROM dual UNION ALL   -- 11 -> 10
+    SELECT '25',       24      FROM dual             -- 25 -> 24
 ),
 
 cycle_cand AS (
@@ -24,7 +25,6 @@ cycle_cand AS (
                 THEN LAST_DAY(ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1))
                 ELSE ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1) + c.e - 1 END  AS end_prev_month
     FROM   cycles c CROSS JOIN params p
-    WHERE  c.bc = '01'                                   -- <== TEST: BC01 only
 ),
 
 cycle_win AS (
@@ -52,8 +52,7 @@ billing AS (
                b.TYPE, b.STATUS, b.PRICE_GROUP,
                ROW_NUMBER() OVER (PARTITION BY b.MSISDN ORDER BY b.RUN_DATE DESC) AS rn
         FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
-        WHERE  b.BILLCYCLE = '01'                        -- <== TEST: BC01 only
-        AND    b.TYPE   = 'POST'
+        WHERE  b.TYPE   = 'POST'
         AND    b.STATUS = 'ACTIVE'
     )
     WHERE rn = 1
@@ -220,4 +219,4 @@ SELECT MSISDN,
             ELSE                                   'Cat 4: 75 - <100%'
        END                                                            AS consumption_category
 FROM   calc
-ORDER  BY MSISDN;
+ORDER  BY BILLCYCLE, MSISDN;
