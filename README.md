@@ -20,7 +20,7 @@ cycles AS (
 cycle_sel AS (
     SELECT bc, e
     FROM   cycles
-    WHERE  bc IN ('01')            -- e.g. ('01') or ('01','07','25')
+    WHERE  bc IN ('01','02','04','07','09','11','25')            -- e.g. ('01') or ('01','07','25')
 ),
 
 cycle_cand AS (
@@ -76,7 +76,7 @@ catalogue AS (
            MAX(PCRF_QOUTA_VALUE_GB)       AS catalogue_quota_gb
     FROM   RP7VFEPIDAT.RD_T_DSL_PRODUCT_CATALOGUE
     WHERE  PROD_TYPE_NAME = 'Main Bundle'
-    AND    UPPER(PCRF_TYPE) = 'POSTPAID'
+   -- AND    UPPER(PCRF_TYPE) = 'POSTPAID'
     GROUP  BY UPPER(TRIM(PCRF_SERVICE_NAME))
 ),
 
@@ -154,6 +154,7 @@ edr_agg AS (
     AND    LOWER(e.SERVICE_NAME) NOT LIKE '%addon%'
     AND    LOWER(e.SERVICE_NAME) NOT LIKE '%throttling%'
     AND    LOWER(e.SERVICE_NAME) NOT LIKE '%promo%'
+	AND    LOWER(e.SERVICE_NAME) NOT LIKE '%adn%'
     AND    LOWER(e.SERVICE_NAME) NOT LIKE '%gift%'
     GROUP  BY s.MSISDN
 ),
