@@ -108,6 +108,8 @@ win_rows AS (
     AND    f.RUN_DATE <  (SELECT max_end + 1 FROM bounds)
     AND    LOWER(f.SERVICE_NAME) NOT LIKE '%addon%'
     AND    LOWER(f.SERVICE_NAME) NOT LIKE '%throttling%'
+	AND    LOWER(f.SERVICE_NAME) NOT LIKE '%promo%'
+	
     -- validation: keep only services found in the postpaid Main Bundle catalogue
     -- (double quota is kept by name, since it is not a Main Bundle)
     AND   ( LOWER(f.SERVICE_NAME) LIKE '%double%quota%'
