@@ -125,39 +125,39 @@ def load_bscs_profiles_adsl(run_date: str, con=None):
                 "the resulting table contains zero rows."
             )
 
-         con.execute(f"""
-         COPY (
-             SELECT *
-             FROM bscs_profiles_adsl
-         )
-         TO '{export_path}'
-         (DELIMITER ',', HEADER TRUE, QUOTE '"', ESCAPE '"');
-         """)
+        con.execute(f"""
+        COPY (
+            SELECT *
+            FROM bscs_profiles_adsl
+        )
+        TO '{export_path}'
+        (DELIMITER ',', HEADER TRUE, QUOTE '"', ESCAPE '"');
+        """)
 
-         logger.info(
-             "Inserting into PI.BSCS_PROFILES_ADSL table .."
-         )
-         ctl_file = prepare_ctl(
-             "bscs_profiles_adsl",
-             run_date
-         )
-         run_sqlldr(
-             "bscs_profiles_adsl",
-             run_date,
-             ctl_file=ctl_file
-         )
-         logger.info("Insertion done")
+        logger.info(
+            "Inserting into PI.BSCS_PROFILES_ADSL table .."
+        )
+        ctl_file = prepare_ctl(
+            "bscs_profiles_adsl",
+            run_date
+        )
+        run_sqlldr(
+            "bscs_profiles_adsl",
+            run_date,
+            ctl_file=ctl_file
+        )
+        logger.info("Insertion done")
 
-         logger.info("Validating inserted data ..")
-         validate_loaded_data(
-             flow_name="bscs_profiles_adsl",
-             run_date=run_date,
-             expected_rows=count,
-             logger=logger
-         )
-         logger.info(
-             "Inserted data validated successfully."
-         )
+        logger.info("Validating inserted data ..")
+        validate_loaded_data(
+            flow_name="bscs_profiles_adsl",
+            run_date=run_date,
+            expected_rows=count,
+            logger=logger
+        )
+        logger.info(
+            "Inserted data validated successfully."
+        )
 
         end_time = datetime.now()
         logger.info("bscs_adsl job finished")
@@ -166,14 +166,14 @@ def load_bscs_profiles_adsl(run_date: str, con=None):
             f"{end_time - start_time}"
         )
 
-         send_mail(
-             subject="BSCS_ADSL Flow Finished",
-             content=f"""
-             Run Date : {run_date}
-             Rows      : {count}
-             DB Validation : Passed
-             Duration  : {end_time - start_time}"""
-         )
+        send_mail(
+            subject="BSCS_ADSL Flow Finished",
+            content=f"""
+            Run Date : {run_date}
+            Rows      : {count}
+            DB Validation : Passed
+            Duration  : {end_time - start_time}"""
+        )
 
         return con.table("bscs_profiles_adsl")
 
@@ -183,13 +183,13 @@ def load_bscs_profiles_adsl(run_date: str, con=None):
             f"error= {str(e)}"
         )
 
-         send_mail(
+        send_mail(
             subject="BSCS_ADSL Flow Failed",
-             content=f"""
-                 Run Date : {run_date}
-                 Error:
-                 {str(e)}
-             """
+            content=f"""
+                Run Date : {run_date}
+                Error:
+                {str(e)}
+            """
         )
 
         raise
