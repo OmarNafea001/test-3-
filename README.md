@@ -1,216 +1,151 @@
-import os
-import sys
 
-PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..")
-)
-sys.path.insert(0, PROJECT_ROOT)
+#!/bin/bash
 
-import duckdb
-import argparse
-import glob
-from datetime import datetime
-from config.duckdb_connection import duckdb_connection
-from utils.logger import get_logger
-from utils.send_mail import send_mail
-from utils.export_to_oracle import prepare_ctl
-from utils.export_to_oracle import run_sqlldr
-from utils.dump_vs_database import validate_loaded_data
+file_name=/apps/raidprd/raid-prj/scripts/logs/$1_PI_ADSL_TE_INVOICE_VALIDATION.log
 
+# Oracle connection variables
+DB_USER="RP7VFEPIDAT"
+DB_PASS="RP7VFEPIDAT"
+DB_SID="RAIDDB"
 
-# Positional mapping (read_csv with header=False -> column00 .. column19)
-#   column00 -> rdrCONTRACT_ID          (index 1)
-#   column01 -> rdrIMSI                 (index 2)
-#   column02 -> rdrRUNNING_NUMBER       (index 3)
-#   column06 -> rdrTM_CODE              (index 7)
-#   column07 -> rdrSUB_STATUS           (index 8)
-#   column08 -> rdrSUB_TYPE             (index 9)
-#   column09 -> rdrMSISDN               (index 10)
-#   column10 -> rdrSN_CODE              (index 11)
-#   column13 -> rdrBILL_CYCLE           (index 14)
-#   column15 -> TMCODE_DES              (index 16)
-#   column18 -> rdrACTIVE_SERVICE_LIST  (index 19)
-#   column19 -> rdrPRICE_GROUP          (index 20)
-
-
-def load_bscs_profiles_adsl(run_date: str, con=None):
-
-    start_time = datetime.now()
-    logger = get_logger(
-        flow="bscs_profiles_adsl",
-        log_dir=None,
-        run_date=run_date
-    )
-
-    try:
-        if con is None:
-            con = duckdb_connection()
-
-        csv_path = (
-            f"/project/PLATFORM_INTEGRITY/exports/"
-            f"bscs_profiles_adsl_{run_date}.csv"
-        )
-        file_path = (
-            f"/RAIDdata/PI/BSCS/raw/"
-            f"CONTRACT_PROFILE_{run_date}.csv.gz"
-        )
-
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Input file not found: {file_path}")
-
-        logger.info(f"Reading {file_path} ..")
-
-        con.execute(f"""
-CREATE OR REPLACE TABLE bscs_profiles_adsl_data AS
-WITH src AS (
-    SELECT
-        COALESCE(TRIM(TRY_CAST(column00 AS VARCHAR)), '') AS CONTRACT_ID,
-        RTRIM(COALESCE(TRIM(TRY_CAST(column09 AS VARCHAR)), ''), '`') AS MSISDN,
-        COALESCE(TRIM(TRY_CAST(column07 AS VARCHAR)), '') AS SUB_STATUS,
-        COALESCE(TRIM(TRY_CAST(column06 AS VARCHAR)), '') AS TM_CODE,
-        COALESCE(TRIM(TRY_CAST(column08 AS VARCHAR)), '') AS SUB_TYPE,
-        COALESCE(TRIM(TRY_CAST(column10 AS VARCHAR)), '') AS SN_CODE,
-        COALESCE(TRIM(TRY_CAST(column13 AS VARCHAR)), '') AS BILL_CYCLE,
-        COALESCE(TRIM(TRY_CAST(column15 AS VARCHAR)), '') AS TMCODE_DES,
-        COALESCE(TRIM(TRY_CAST(column18 AS VARCHAR)), '') AS ACTIVE_SERVICE_LIST,
-        COALESCE(TRIM(TRY_CAST(column19 AS VARCHAR)), '') AS PRICE_GROUP,
-
-        -- RUN_DATE extracted from the file name (XML: RegExpPart .*_.*_([0-9]*).*)
-        regexp_extract(
-            regexp_extract(filename, '[^/]+$'),
-            '.*_.*_([0-9]*).*',
-            1
-        ) AS EXTRACT_DATE
-
-    FROM read_csv_auto(
-        '{file_path}',
-        delim='|',
-        header=FALSE,
-        all_varchar=TRUE,
-        quote='',
-        escape='',
-        null_padding=TRUE,
-        filename=TRUE,
-        ignore_errors=TRUE
-    )
-),
-
--- one value per TM_CODE so the join can never duplicate rows
-lkp AS (
-    SELECT
-        TRIM(TRY_CAST(TMCODE AS VARCHAR)) AS TMCODE,
-        ANY_VALUE(COALESCE(TRIM(TRY_CAST(PCRF_SERVICE_NAME AS VARCHAR)), '')) AS PCRF_SERVICE_NAME
-    FROM lkp17
-    GROUP BY 1
+# Step 1: Check if QUOTA_NAME_lkp has data for this date
+ROW_COUNT=$($ORACLE_HOME/bin/sqlplus -s "$DB_USER/$DB_PASS@$DB_SID" <<EOF
+SET HEADING OFF FEEDBACK OFF VERIFY OFF ECHO OFF
+SELECT COUNT(*) FROM RP7VFEPIDAT.QUOTA_NAME_lkp
+WHERE "TIME"  = TO_DATE('$1','YYYYMMDD');
+EXIT;
+EOF
 )
 
-SELECT
-    TRY_CAST(STRPTIME(src.EXTRACT_DATE, '%Y%m%d') AS DATE) AS RUN_DATE,
+ROW_COUNT=$(echo "$ROW_COUNT" | xargs)
 
-    src.CONTRACT_ID,
-    src.MSISDN,
-    src.TM_CODE,
+if [ "$ROW_COUNT" -gt 0 ]; then
+    echo "QUOTA_NAME_LKP already has data for $1. Skipping QUOTA_NAME_lkp.sh..."
+else
+    echo "No data found in QUOTA_NAME_LKP for $1. Running QUOTA_NAME_lkp.sh..."
+    cd /RAIDdata/PI/PCRF_EDRS
+    ./QUOTA_NAME_lkp.sh $1
+fi
 
-    CASE
-        WHEN UPPER(src.SUB_STATUS) = 'A' THEN 'ACTIVE'
-        WHEN UPPER(src.SUB_STATUS) = 'S' THEN 'SUSPENDED'
-        ELSE 'DEACTIVE'
-    END AS STATUS,
+# Step 2: Continue with rest of the main script
+$ORACLE_HOME/bin/sqlplus -s > $file_name <<END
+$DB_USER/$DB_PASS@$DB_SID
 
-    CASE
-        WHEN src.SUB_TYPE = 'PREPAID'    THEN 'PRE'
-        WHEN src.SUB_TYPE = 'POSTPAID'   THEN 'POST'
-        WHEN src.SUB_TYPE = 'C2BCONTROL' THEN 'CTRL'
-        WHEN src.SUB_TYPE = 'CONTROL'    THEN 'CTRL'
-        ELSE src.SUB_TYPE
-    END AS TYPE,
+INSERT INTO RD_T_TE_INVOICE_VALIDATION
+SELECT DISTINCT RUN_DATE,TE_MSISDN,RADIUS_STATUS ,BILLING_STATUS,CHARGING_STATUS,
+(CASE WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'ACTIVE'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='ACTIVE' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist/DEACTIVE'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
+ELSE '_N' END)CASE_COMMENT,Customer_TYPE,PCRF_STATUS,QUOTA.QUOTA_NAME,te.te_speed AS TE_SPEED,
+REGEXP_SUBSTR(QUOTA.QUOTA_NAME,'[0-9]+M', 1, 1) AS speed
+FROM(
+SELECT DISTINCT TE.RUN_DATE, TE.MSISDN TE_MSISDN, NVL(UPPER(DECODE(RADIUS.STATUS,'0','DeActive','1','Active','2','Suspended',RADIUS.STATUS)), 'Not_Exist') RADIUS_STATUS ,
+NVL(BSCS.STATUS, 'Not_Exist') BILLING_STATUS, NVl(UPPER(CHARGING.STATUS), 'Not_Exist') CHARGING_STATUS,BSCS.TYPE AS Customer_TYPE,TE.te_speed,
+UPPER(DECODE(PCRF.Customer_STATUS,0,'DeActive',1,'Active',2,'Suspended',3,'On-Hold', PCRF.Customer_STATUS)) PCRF_STATUS
+FROM RP7VFEPIDAT.RD_T_TE_DATA_BASE_HISTORICAL  TE
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_BSCS_ADSL WHERE run_date = to_number('$1')) BSCS
+ON TE.MSISDN = BSCS.MSISDN
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_PCRF_FILTERED WHERE RUN_DATE = to_date('$1','YYYYMMDD')) PCRF
+ON TE.MSISDN = PCRF.MSISDN
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_RADIUS WHERE run_date = to_number('$1')) RADIUS
+ON TE.MSISDN = RADIUS.MSISDN
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL where (PACKAGE_TYPE ='DSL Status') AND run_date = to_date('$1','YYYYMMDD')) CHARGING
+ON TE.MSISDN = CHARGING.MSISDN
+)TE
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.QUOTA_NAME_LKP qnl WHERE Time =to_date('$1','YYYYMMDD')) QUOTA
+ON TE_MSISDN = QUOTA.MSISDN
+WHERE run_date = to_date('$1','YYYYMMDD');
 
-    src.BILL_CYCLE,
-    src.TMCODE_DES AS TM_CODE_DESC,
-    src.PRICE_GROUP,
+COMMIT;
+--------------------------------Then
+$ORACLE_HOME/bin/sqlplus -s <<END
+RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
 
-    CASE
-        WHEN l.TMCODE IS NOT NULL THEN l.PCRF_SERVICE_NAME
-        ELSE '_N'
-    END AS PCRF_SERVICE_NAME_EXPECTED,
+UPDATE  RP7VFEPIDAT.RD_T_TE_INVOICE_VALIDATION rttiv
+SET CUSTOMER_TYPE ='NA'
+WHERE CUSTOMER_TYPE IS NULL;
 
-    CASE
-        WHEN (',' || src.ACTIVE_SERVICE_LIST || ',') LIKE '%,505,%'
-          OR (',' || src.ACTIVE_SERVICE_LIST || ',') LIKE '%,507,%'
-        THEN 1
-        ELSE 0
-    END AS AUTO_ACTIVATION_FLAG
-
-FROM src
-LEFT JOIN lkp l
-    ON src.TM_CODE = l.TMCODE
-
-WHERE src.SN_CODE = '504';
-""")
-
-        count = con.execute(
-            "SELECT COUNT(*) FROM bscs_profiles_adsl_data"
-        ).fetchone()[0]
-        logger.info(f"Total processed rows: {count}")
-
-        if count == 0:
-            logger.info("No bscs_profiles_adsl data processed!")
-            raise ValueError("No bscs_profiles_adsl data processed (0 rows)")
-
-        con.execute(f"""
-        COPY (
-            SELECT RUN_DATE, CONTRACT_ID, MSISDN, TM_CODE, STATUS, TYPE,
-                   BILL_CYCLE, TM_CODE_DESC, PRICE_GROUP,
-                   PCRF_SERVICE_NAME_EXPECTED, AUTO_ACTIVATION_FLAG
-            FROM bscs_profiles_adsl_data
-        )
-        TO '{csv_path}'
-        (DELIMITER ',', HEADER TRUE, QUOTE '"', ESCAPE '"');
-    """)
-
-        logger.info("Inserting into PI.BSCS_PROFILES_ADSL table ..")
-        ctl_file = prepare_ctl("bscs_profiles_adsl", run_date)
-        run_sqlldr("bscs_profiles_adsl", run_date, ctl_file=ctl_file)
-        logger.info("Insertion done")
-        logger.info("Validating inserted data ..")
-
-        validate_loaded_data(
-            flow_name="bscs_profiles_adsl",
-            run_date=run_date,
-            expected_rows=count,
-            logger=logger)
-
-        logger.info("Inserted data validated successfully.")
-
-        end_time = datetime.now()
-        logger.info("bscs_profiles_adsl finished")
-        logger.info(f"Total duration: {end_time - start_time}")
-        send_mail(
-            subject="BSCS_PROFILES_ADSL Flow Finished",
-            content=f"""
-                Run Date : {run_date}
-                Rows      : {count}
-                DB Validation : Passed
-                Duration  : {end_time - start_time}""")
-
-        return con.table("bscs_profiles_adsl_data")
-
-    except Exception as e:
-        logger.exception(
-            f"BSCS_PROFILES_ADSL failed for run_date= {run_date} | error= {str(e)}"
-        )
-        send_mail(
-            subject="BSCS_PROFILES_ADSL Flow Failed",
-            content=f"""
-            Run Date : {run_date}
-            Error:
-            {str(e)}
-            """)
-        raise
+COMMIT;
+EXIT;
+END;
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run_date", required=True)
-    args = parser.parse_args()
-    load_bscs_profiles_adsl(run_date=args.run_date)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+LOOKUP: QUOTA_NAME_lkp
+-------------------------------------------------
+RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
+INSERT INTO QUOTA_NAME_lkp (TIME,MSISDN, QUOTA_NAME,SOURCE )
+SELECT  /*+ PARALLEL(16) */ TIME,msisdn,QUOTA_NAME, SOURCE
+FROM(
+SELECT /*+ PARALLEL(16) */
+TO_DATE($1,'YYYYMMDD') AS TIME,msisdn, SERVICE_NAME AS QUOTA_NAME, SOURCE,
+row_number() over(PARTITION BY msisdn ORDER BY run_date desc ) r
+FROM (SELECT TO_DATE(to_Char(RUN_DATE),'YYYYMMDD') run_Date,msisdn,PCRF_SERVICE_NAME_EXPECTED  SERVICE_NAME ,
+'BSCS' AS Source
+FROM RP7VFEPIDAT.PFM_BSCS_ADSL pba
+WHERE RUN_DATE =$1
+AND "TYPE" ='POST'
+AND TMCODE_DES  NOT LIKE 'SDSL%'
+AND TMCODE_DES  NOT LIKE 'Cloud%'
+UNION
+SELECT run_date,msisdn,PCRF_SERVICE_ID_EXPECTED SERVICE_NAME,'IN' AS Source
+FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL rtiah
+WHERE  RUN_DATE = TO_DATE($1,'YYYYMMDD')
+AND PACKAGE_TYPE ='Main Bundle'
+UNION
+SELECT /*+ PARALLEL(16) */
+TO_DATE($1,'YYYYMMDD') AS Run_Date,MSISDN,SERVICE_NAME, 'PCRF' AS Source
+FROM (SELECT /*+ PARALLEL(16) */
+MSISDN,BILL_CYCLE,SERVICE_NAME,SVCPKG_NAME,
+VALID_DATE,EXPIRY_DATE,QUOTA_STATUS,RUN_DATE,CUSTOMER_STATUS,THROT_FLAG,PACKAGE_TYPE,
+ROW_NUMBER () OVER (PARTITION BY MSISDN ORDER BY RUN_DATE DESC) r
+FROM RP7VFEPIDAT.PFM_PCRF pp
+WHERE run_date <=  $1
+ AND PACKAGE_TYPE ='Main Bundle'
+ AND SERVICE_NAME <> 'Serv_DSL_Generic_Promo'
+ AND SERVICE_NAME <> 'Serv_DSL_Compensation_Gift'
+ AND SERVICE_NAME <> 'Serv_DSL_Throttling'
+ AND SERVICE_NAME <> 'ADSL_OnHold'
+ AND SERVICE_NAME <> 'Serv_DSL_Double_Quota_Pre'
+ AND SERVICE_NAME NOT LIKE  '%Add%'
+ AND SERVICE_NAME NOT LIKE  '%DoubleQuota%')
+WHERE r =1))
+WHERE r =1;
+Commit;
+
+
+if i have the following and i want to create customers numbers on our base and do not exist on TE Invoice, mentioning their service name, speed, and their consumption during the invoice month.
+
+and please add their percentage from our total base.  if u have questions ask me 
+exit;
+END
