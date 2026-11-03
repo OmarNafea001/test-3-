@@ -1,151 +1,288 @@
-NOW WE HAVE SOME NEGATIVE VARIANCE THAT WE WANT TO SOLVE?
+ALTER SESSION ENABLE PARALLEL QUERY;
 
-THIS MSISDN LOOK HE WAS 180 THEN 140 THEN HE 180 AGAIN 
-THE QUERY ONLY SHOW THAT THE 140 AND JUST 1>180  SO THE ALLOCATED IS WRONG
+WITH params AS (
+    SELECT /*+ PARALLEL(f 32) */ TRUNC(MAX(f.RUN_DATE)) AS ref_date
+    FROM   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
+),
 
-Serv_ADSL_HS_30M_180G|2026-10-01 00:00:00.000|4197401          |209715200    |205517799    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-02 00:00:00.000|12498369         |209715200    |197216831    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-03 00:00:00.000|26680074         |209715200    |183035126    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-04 00:00:00.000|32074326         |209715200    |177640874    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-05 00:00:00.000|1935962          |157286400    |155350438    |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-06 00:00:00.000|9739689          |157286400    |147546711    |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-07 00:00:00.000|15070923         |157286400    |142215477    |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-08 00:00:00.000|25600373         |157286400    |131686027    |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-09 00:00:00.000|39071980         |157286400    |118214420    |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-10 00:00:00.000|61207939         |157286400    |96078461     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-11 00:00:00.000|73333517         |157286400    |83952883     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-12 00:00:00.000|79141792         |157286400    |78144608     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-13 00:00:00.000|89026530         |157286400    |68259870     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-14 00:00:00.000|98772034         |157286400    |58514366     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-15 00:00:00.000|104308359        |157286400    |52978041     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-16 00:00:00.000|111669097        |157286400    |45617303     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-17 00:00:00.000|139571235        |157286400    |17715165     |157286400|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-18 00:00:00.000|157287779        |157286400    |0            |157287779|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-19 00:00:00.000|157287779        |157286400    |0            |157287779|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-20 00:00:00.000|157287779        |157286400    |0            |157287779|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-21 00:00:00.000|157287779        |157286400    |0            |157287779|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-22 00:00:00.000|157287779        |157286400    |0            |157287779|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-23 00:00:00.000|157287779        |157286400    |0            |157287779|               150|                   0|                 0|
-Serv_ADSL_HS_30M_140G|2026-10-24 00:00:00.000|157287779        |157286400    |0            |157287779|               150|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-25 00:00:00.000|17406343         |209715200    |192308857    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-26 00:00:00.000|29703660         |209715200    |180011540    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-27 00:00:00.000|42699670         |209715200    |167015530    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-28 00:00:00.000|60824226         |209715200    |148890974    |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-29 00:00:00.000|117462736        |209715200    |92252464     |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-30 00:00:00.000|125833506        |209715200    |83881694     |209715200|               200|                   0|                 0|
-Serv_ADSL_HS_30M_180G|2026-10-31 00:00:00.000|190236618        |209715200    |19478582     |209715200|               200| 
+cycles AS (
+    -- bc = bill cycle, e = END day of cycle (31 = last day of month -> LAST_DAY handles 28/29/30/31)
+    SELECT '01' AS bc, 31 AS e FROM dual UNION ALL
+    SELECT '02',       15      FROM dual UNION ALL   -- 16 -> 15
+    SELECT '04',        3      FROM dual UNION ALL   -- 4  -> 3
+    SELECT '07',        6      FROM dual UNION ALL   -- 7  -> 6
+    SELECT '09',       20      FROM dual UNION ALL   -- 21 -> 20 (to be confirmed)
+    SELECT '11',       10      FROM dual UNION ALL   -- 11 -> 10
+    SELECT '25',       24      FROM dual             -- 25 -> 24
+),
 
+-- >>> CHOOSE THE BILL CYCLES TO RUN HERE <<<
+cycle_sel AS (
+    SELECT bc, e
+    FROM   cycles
+    WHERE  bc IN ('01','02','04','07','09','11','25')            -- e.g. ('01') or ('01','07','25')
+),
 
+cycle_cand AS (
+    SELECT c.bc, c.e, p.ref_date,
+           CASE WHEN c.e = 31
+                THEN LAST_DAY(TRUNC(p.ref_date,'MM'))
+                ELSE TRUNC(p.ref_date,'MM') + c.e - 1 END                 AS end_this_month,
+           CASE WHEN c.e = 31
+                THEN LAST_DAY(ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1))
+                ELSE ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1) + c.e - 1 END  AS end_prev_month
+    FROM   cycle_sel c CROSS JOIN params p
+),
 
-HE REPURCHASE IT BUT I CANNOT INDICATE THAT FROM THE QUOTA_SUM AS THEY ARE SEPERATE FROM EACHOTHER.
---20228921274
-DO U GET IT IS THERE A WAY TO SOLVE IT? 
+cycle_win AS (
+    SELECT bc, cycle_start, cycle_end,
+           -- BSCS RUN_DATE is a number (YYYYMMDD), so keep the window as numbers too
+           TO_NUMBER(TO_CHAR(cycle_start,'YYYYMMDD')) AS cs_num,
+           TO_NUMBER(TO_CHAR(cycle_end,  'YYYYMMDD')) AS ce_num
+    FROM (
+        SELECT bc, cycle_end,
+               CASE WHEN e = 31 THEN TRUNC(cycle_end,'MM')
+                    ELSE ADD_MONTHS(cycle_end,-1) + 1 END AS cycle_start
+        FROM (
+            SELECT bc, e,
+                   CASE WHEN end_this_month <= ref_date
+                        THEN end_this_month ELSE end_prev_month END AS cycle_end
+            FROM cycle_cand
+        )
+    )
+),
 
+bounds AS (
+    SELECT MIN(cycle_start) AS min_start, MAX(cycle_end) AS max_end,
+           MIN(cs_num)      AS min_num,   MAX(ce_num)    AS max_num
+    FROM   cycle_win
+),
 
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-24 00:00:00.000|140015727        |157286400    |17270673     |157286400|               150|                   0|                 0|
-20228921274|Serv_DSL_Addon_100G_R_POST|2026-10-25 00:00:00.000|8455245          |104857600    |96402355     |104857600|               100|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-25 00:00:00.000|157292869        |157286400    |0            |157292869|               150|                   0|                 0|
-20228921274|Serv_DSL_Addon_100G_R_POST|2026-10-26 00:00:00.000|27468783         |104857600    |77388817     |104857600|               100|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-26 00:00:00.000|157292869        |157286400    |0            |157292869|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-27 00:00:00.000|9447074          |157286400    |147839326    |157286400|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-28 00:00:00.000|22990666         |157286400    |134295734    |157286400|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-29 00:00:00.000|29288320         |157286400    |127998080    |157286400|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-30 00:00:00.000|45037873         |157286400    |112248527    |157286400|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-10-31 00:00:00.000|51345160         |157286400    |105941240    |157286400|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-11-01 00:00:00.000|0                |157286400    |157286400    |157286400|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-11-02 00:00:00.000|0                |157286400    |157286400    |157286400|               150|                   0|                 0|
-20228921274|Serv_ADSL_HS_30M_140G     |2026-11-03 00:00:00.000|0                |157286400    |157286400    |157286400|               150|                   0|                 0|
+-- ---------------------------------------------------------------------
+-- BILLING - LAYER 1: postpaid rows inside the bill period of their own
+-- bill cycle only (BC01 rows -> BC01 window, BC02 rows -> BC02 window ...)
+-- ---------------------------------------------------------------------
+bscs_post AS (
+    SELECT /*+ MATERIALIZE PARALLEL(b 32) USE_HASH(w) */
+           b.MSISDN, b.RUN_DATE, b.BILLCYCLE, b.PCRF_SERVICE_NAME_EXPECTED,
+           b.STATUS, b.PRICE_GROUP, b.TMCODE_DES,
+           w.cycle_start, w.cycle_end, w.cs_num, w.ce_num
+    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
+    JOIN   cycle_win w
+           ON  w.bc        = b.BILLCYCLE
+           AND b.RUN_DATE >= w.cs_num
+           AND b.RUN_DATE <= w.ce_num
+    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
+    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
+    AND    b.TYPE = 'POST'
+    AND    b.MSISDN NOT LIKE '%CP%'                              -- exclude CP numbers
+),
 
+-- one row per MSISDN = its last postpaid row in the period,
+-- kept only if it was ACTIVE on ANY day of the period
+billing AS (
+    SELECT MSISDN, BILLCYCLE, PCRF_SERVICE_NAME_EXPECTED,
+           cycle_start, cycle_end, cs_num, ce_num
+    FROM (
+        SELECT x.*,
+               ROW_NUMBER() OVER (PARTITION BY x.MSISDN ORDER BY x.RUN_DATE DESC) AS rn,
+               MAX(CASE WHEN x.STATUS = 'ACTIVE' THEN 1 ELSE 0 END)
+                   OVER (PARTITION BY x.MSISDN)                               AS was_active
+        FROM   bscs_post x
+    )
+    WHERE rn = 1
+    AND   was_active = 1
+    AND   NVL(PRICE_GROUP,'x') NOT IN ('TEST PHONES','Pre-paid Test SIM',
+                                       'Test Individuals','Dummy PG')
+    AND   UPPER(NVL(TMCODE_DES,'x')) NOT LIKE '%SDSL%'      -- exclude SDSL
+),
 
-------------------------------------
+-- ---------------------------------------------------------------------
+-- BILLING - LAYER 2: every prepaid row in the same date range.
+-- If the MSISDN is PRE on any day of ITS period -> drop the whole MSISDN.
+-- (PRE after the period end is ignored.)
+-- ---------------------------------------------------------------------
+bscs_pre AS (
+    SELECT /*+ MATERIALIZE PARALLEL(b 32) */ DISTINCT b.MSISDN, b.RUN_DATE
+    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
+    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
+    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
+    AND    b.TYPE = 'PRE'
+),
 
-SOMETHIN ELSE TO CHANGE : can i make from edrs to calculate from the edrs consumption column 
-which is the last column record for each service as it accumulated like that? 
+billing_ok AS (
+    SELECT b.*
+    FROM   billing b
+    WHERE  NOT EXISTS (
+               SELECT /*+ HASH_AJ */ 1
+               FROM   bscs_pre p
+               WHERE  p.MSISDN    = b.MSISDN
+               AND    p.RUN_DATE >= b.cs_num
+               AND    p.RUN_DATE <= b.ce_num
+           )
+),
 
-MSISDN    |SERVICE_NAME         |RUN_DATE|QUOTA_CONSUMPTION|EXPECTED_ORG_QUOTA|EXPECTED_TAX_QUOTA|TIME                   |TRIGGER_TYPE             |QUOTA_NAME           |QUOTA_STATUS|QUOTA_USAGE|QUOTA_VALUE|ACTUAL_QUOTA_USAGE|SERVICE_EXTENDED_ATTRIBUTE1|
-----------+---------------------+--------+-----------------+------------------+------------------+-----------------------+-------------------------+---------------------+------------+-----------+-----------+------------------+---------------------------+
-0132401305|Serv_ADSL_HS_30M_140G|20260916|3147582          |               150|                 0|2026-09-16 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |3147582    |157286400  |3147582           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260916|3830493          |               150|                 0|2026-09-16 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Normal      |682911     |157286400  |682911            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260917|18112984         |               150|                 0|2026-09-17 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Normal      |1690329    |157286400  |1690329           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260917|16422655         |               150|                 0|2026-09-17 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |6296043    |157286400  |6296043           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260917|10126612         |               150|                 0|2026-09-16 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |6296119    |157286400  |6296119           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260918|28901250         |               150|                 0|2026-09-18 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Normal      |269052     |157286400  |269052            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260918|25483658         |               150|                 0|2026-09-18 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Normal      |1066750    |157286400  |1066750           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260918|24416908         |               150|                 0|2026-09-18 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |6303924    |157286400  |6303924           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260918|28632198         |               150|                 0|2026-09-18 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |3148540    |157286400  |3148540           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260919|48506482         |               150|                 0|2026-09-19 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |6292874    |157286400  |6292874           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260919|38353227         |               150|                 0|2026-09-18 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |9451977    |157286400  |9451977           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260919|42213608         |               150|                 0|2026-09-19 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Normal      |711921     |157286400  |711921            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260919|41501687         |               150|                 0|2026-09-19 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |3148460    |157286400  |3148460           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260920|49832596         |               150|                 0|2026-09-19 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Normal      |1326114    |157286400  |1326114           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260921|84250833         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |2828424    |157286400  |2828424           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260921|75029859         |               150|                 0|2026-09-20 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |25197263   |157286400  |25197263          |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260921|81422409         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |888483     |157286400  |888483            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260921|87400692         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level1      |3149859    |157286400  |3149859           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260921|80533926         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |41192      |157286400  |41192             |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260921|78643673         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level1      |3613814    |157286400  |3613814           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260921|80492734         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |1849061    |157286400  |1849061           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|103426291        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |2736992    |157286400  |2736992           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|100689299        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level1      |3149219    |157286400  |3149219           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|88084018         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |227880     |157286400  |227880            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|106022628        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |249644     |157286400  |249644            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|87856138         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |455446     |157286400  |455446            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|105772984        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |212567     |157286400  |212567            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|105560417        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |2134126    |157286400  |2134126           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260922|97540080         |               150|                 0|2026-09-21 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level1      |9456062    |157286400  |9456062           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|106188398        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |72605      |157286400  |72605             |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|106115793        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |51895      |157286400  |51895             |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|109342162        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level1      |3153764    |157286400  |3153764           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|106063898        |               150|                 0|2026-09-22 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level1      |41270      |157286400  |41270             |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|6978276          |               150|                 0|2026-09-16 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Normal      |3147783    |157286400  |3147783           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|120264872        |               150|                 0|2026-09-23 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level2      |1255324    |157286400  |1255324           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|119009548        |               150|                 0|2026-09-23 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level2      |1036979    |157286400  |1036979           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260923|117972569        |               150|                 0|2026-09-23 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level2      |8630407    |157286400  |8630407           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260924|121103517        |               150|                 0|2026-09-24 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level2      |838645     |157286400  |838645            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260925|136857811        |               150|                 0|2026-09-24 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level2      |15754294   |157286400  |15754294          |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260925|147906543        |               150|                 0|2026-09-25 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level2      |134246     |157286400  |134246            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260925|146312092        |               150|                 0|2026-09-25 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level2      |9454281    |157286400  |9454281           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260925|147772297        |               150|                 0|2026-09-25 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level2      |1460205    |157286400  |1460205           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260926|151283552        |               150|                 0|2026-09-25 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Level2      |3150036    |157286400  |3150036           |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260926|148133516        |               150|                 0|2026-09-25 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_140G_Main|Level2      |226973     |157286400  |226973            |4440                       |
-0132401305|Serv_ADSL_HS_30M_140G|20260926|157286504        |               150|                 0|2026-09-26 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_140G_Main|Exhaust     |6002952    |157286400  |6002952           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261002|2560             |               200|                 0|2026-10-02 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Normal      |2560       |209715200  |2560              |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261005|29399490         |               200|                 0|2026-10-04 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |29396930   |209715200  |29396930          |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261005|46188945         |               200|                 0|2026-10-05 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |16789455   |209715200  |16789455          |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261005|49608715         |               200|                 0|2026-10-05 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Normal      |1          |209715200  |1                 |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261005|49608714         |               200|                 0|2026-10-05 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Normal      |52131      |209715200  |52131             |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261005|49556583         |               200|                 0|2026-10-05 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Normal      |3367638    |209715200  |3367638           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261006|64597449         |               200|                 0|2026-10-06 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Normal      |2391312    |209715200  |2391312           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261006|62206137         |               200|                 0|2026-10-06 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |4197216    |209715200  |4197216           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261006|58008921         |               200|                 0|2026-10-05 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |8400206    |209715200  |8400206           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261007|68792955         |               200|                 0|2026-10-06 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |4195506    |209715200  |4195506           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261007|72988436         |               200|                 0|2026-10-07 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |4195481    |209715200  |4195481           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261007|76779983         |               200|                 0|2026-10-07 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Normal      |3791547    |209715200  |3791547           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261008|80976282         |               200|                 0|2026-10-08 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |4196299    |209715200  |4196299           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261009|97774208         |               200|                 0|2026-10-08 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Normal      |16797926   |209715200  |16797926          |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261009|113250926        |               200|                 0|2026-10-09 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level1      |8391708    |209715200  |8391708           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261009|104859218        |               200|                 0|2026-10-09 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level1      |7085010    |209715200  |7085010           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261010|114078730        |               200|                 0|2026-10-09 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Level1      |827804     |209715200  |827804            |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261011|123644367        |               200|                 0|2026-10-11 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Level1      |1161900    |209715200  |1161900           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261011|122482467        |               200|                 0|2026-10-11 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level1      |4204531    |209715200  |4204531           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261011|118277936        |               200|                 0|2026-10-11 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level1      |4199206    |209715200  |4199206           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261012|132043780        |               200|                 0|2026-10-11 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level1      |8399413    |209715200  |8399413           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261012|140707665        |               200|                 0|2026-10-12 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Level1      |269238     |209715200  |269238            |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261012|140438427        |               200|                 0|2026-10-12 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level1      |8394647    |209715200  |8394647           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261012|140707668        |               200|                 0|2026-10-12 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Level1      |3          |209715200  |3                 |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261013|153299776        |               200|                 0|2026-10-12 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level1      |12592108   |209715200  |12592108          |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261014|190877880        |               200|                 0|2026-10-13 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level2      |37578104   |209715200  |37578104          |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261014|203476939        |               200|                 0|2026-10-14 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Level2      |12599059   |209715200  |12599059          |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261014|205019556        |               200|                 0|2026-10-14 00:00:00.000|GX_CC_REQUEST_TERMINATION|ADSL_HS_30M_180G_Main|Level2      |1542617    |209715200  |1542617           |4440                       |
-0132401305|Serv_ADSL_HS_30M_180G|20261015|209725192        |               200|                 0|2026-10-14 00:00:00.000|GX_CC_REQUEST_UPDATE     |ADSL_HS_30M_180G_Main|Exhaust     |4705636    |209715200  |4705636           |4440                       |
+-- postpaid Main Bundles only: used for catalogue quota AND as the list of valid PCRF services
+-- services containing _GC_ are removed here (INSTR searches the text literally)
+catalogue AS (
+    SELECT /*+ MATERIALIZE */
+           UPPER(TRIM(PCRF_SERVICE_NAME)) AS svc_key,
+           MAX(PCRF_QOUTA_VALUE_GB)       AS catalogue_quota_gb
+    FROM   RP7VFEPIDAT.RD_T_DSL_PRODUCT_CATALOGUE
+    WHERE  PROD_TYPE_NAME = 'Main Bundle'
+    AND    INSTR(UPPER(PCRF_SERVICE_NAME), '_GC_') = 0
+   -- AND    UPPER(PCRF_TYPE) = 'POSTPAID'
+    GROUP  BY UPPER(TRIM(PCRF_SERVICE_NAME))
+),
 
+subs AS (
+    SELECT /*+ MATERIALIZE */
+           b.MSISDN,
+           SUBSTR(b.MSISDN, 2) AS edr_msisdn,
+           b.BILLCYCLE,
+           b.cycle_start, b.cycle_end,
+           c.catalogue_quota_gb
+    FROM   billing_ok b
+    LEFT JOIN catalogue c ON c.svc_key = UPPER(TRIM(b.PCRF_SERVICE_NAME_EXPECTED))
+),
 
+win_rows AS (
+    SELECT /*+ PARALLEL(f 32) USE_HASH(f) */
+           s.MSISDN,
+           f.SERVICE_NAME,
+           f.RUN_DATE,
+           f.QUOTA_SUM,
+           CASE WHEN LOWER(f.SERVICE_NAME) LIKE '%double%quota%' THEN 1 ELSE 0 END AS is_double
+    FROM   subs s
+    JOIN   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
+           ON  f.MSISDN   = s.MSISDN
+           AND f.RUN_DATE >= s.cycle_start
+           AND f.RUN_DATE <  s.cycle_end + 1
+    WHERE  f.RUN_DATE >= (SELECT min_start   FROM bounds)
+    AND    f.RUN_DATE <  (SELECT max_end + 1 FROM bounds)
+    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%addon%'
+    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%throttling%'
+    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%promo%'
+    AND    INSTR(UPPER(f.SERVICE_NAME), '_GC_') = 0   -- also covers double quota
 
+    -- validation: keep only services found in the postpaid Main Bundle catalogue
+    -- (double quota is kept by name, since it is not a Main Bundle)
+    AND   ( LOWER(f.SERVICE_NAME) LIKE '%double%quota%'
+            OR UPPER(TRIM(f.SERVICE_NAME)) IN (SELECT svc_key FROM catalogue) )
+),
 
+-- last quota value of each service in the cycle (not rounded yet)
+svc_last AS (
+    SELECT MSISDN, SERVICE_NAME, is_double,
+           MIN(RUN_DATE) AS first_dt,
+           MAX(RUN_DATE) AS last_dt,
+           MAX(QUOTA_SUM) KEEP (DENSE_RANK LAST ORDER BY RUN_DATE) / 1048576 AS svc_quota_gb
+    FROM   win_rows
+    GROUP  BY MSISDN, SERVICE_NAME, is_double
+),
 
+-- sum first, then round to whole GB
+quota_agg AS (
+    SELECT MSISDN,
+           ROUND(SUM(CASE WHEN is_double = 0 THEN svc_quota_gb END))  AS main_quota_gb,
+           COUNT(CASE WHEN is_double = 0 THEN 1 END)                  AS main_svc_cnt,
+           ROUND(SUM(CASE WHEN is_double = 1 THEN svc_quota_gb END))  AS double_quota_gb,
+           COUNT(CASE WHEN is_double = 1 THEN 1 END)                  AS double_svc_cnt,
+           MAX(CASE WHEN is_double = 0 THEN last_dt END)              AS main_last_date,
+           MAX(CASE WHEN is_double = 1 THEN last_dt END)              AS double_last_date,
+           LISTAGG(CASE WHEN is_double = 0 THEN SERVICE_NAME END, ' > ')
+               WITHIN GROUP (ORDER BY first_dt)                       AS main_services
+    FROM   svc_last
+    GROUP  BY MSISDN
+),
 
+edr_agg AS (
+    -- QUOTA_CONSUMPTION is a running total per service:
+    -- take its highest value per service (= final total, records can arrive out of order),
+    -- then sum all services of the MSISDN
+    SELECT MSISDN,
+           ROUND(SUM(svc_cons) / 1048576) AS cons_edr_gb,
+           SUM(svc_sessions)              AS edr_sessions
+    FROM (
+    SELECT /*+ PARALLEL(e 32) USE_HASH(e) */
+           s.MSISDN,
+           e.SERVICE_NAME,
+           MAX(e.QUOTA_CONSUMPTION)            AS svc_cons,
+           COUNT(*)                            AS svc_sessions
+    FROM   subs s
+    JOIN   RP7VFEPIDAT.PFM_PCRF_EDRS_STG_CONSUM e
+           ON  e.MSISDN = s.edr_msisdn
+           AND e.TIME  >= s.cycle_start
+           AND e.TIME   < s.cycle_end + 1
+    WHERE  e.TIME >= (SELECT min_start   FROM bounds)
+    AND    e.TIME <  (SELECT max_end + 1 FROM bounds)
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%addon%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%throttling%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%promo%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%adn%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%gift%'
+    AND    INSTR(UPPER(e.SERVICE_NAME), '_GC_') = 0
+    GROUP  BY s.MSISDN, e.SERVICE_NAME
+    )
+    GROUP  BY MSISDN
+),
 
+calc AS (
+    SELECT s.MSISDN, s.BILLCYCLE, s.cycle_start, s.cycle_end,
+           s.catalogue_quota_gb,
+           q.main_last_date, q.double_last_date,
+           q.main_services,
+           NVL(q.main_svc_cnt,0)                                 AS main_svc_cnt,
+           q.main_quota_gb,
+           NVL(q.double_quota_gb,0)                              AS double_quota_gb,
+           CASE WHEN NVL(q.double_svc_cnt,0) > 0 THEN 1 ELSE 0 END AS has_double,
+           NVL(q.main_quota_gb,0) + NVL(q.double_quota_gb,0)     AS allocated_gb,
+           NVL(e.cons_edr_gb,0)                                  AS cons_e,
+           NVL(e.edr_sessions,0)                                 AS edr_sessions
+    FROM   subs s
+    LEFT JOIN quota_agg q ON q.MSISDN = s.MSISDN    -- keeps customers with no PCRF data
+    LEFT JOIN edr_agg   e ON e.MSISDN = s.MSISDN
+)
 
+SELECT MSISDN,
+       BILLCYCLE,
+       cycle_start,
+       cycle_end,
+       TO_CHAR(cycle_end,'YYYY-MM')                                   AS cycle_month,
+       TO_CHAR(cycle_end,'FMMonth YYYY','NLS_DATE_LANGUAGE=ENGLISH')  AS cycle_month_name,
 
-0|                 0|
-Serv_ADSL_HS_30M_180G|2026-11-01 00:00:00.000|0                |209715200    |209715200    |209715200|               200|                   0|                 0|
+       CASE WHEN main_svc_cnt > 1 THEN 'Yes' ELSE 'No' END            AS service_changed,
+       main_svc_cnt                                                   AS main_services_count,
+       main_services,
+
+       main_last_date                                                 AS main_quota_date,
+       main_quota_gb,
+       CASE WHEN has_double = 1 THEN 'Yes' ELSE 'No' END              AS double_quota,
+       double_last_date                                               AS double_quota_date,
+       double_quota_gb,
+       allocated_gb                                                   AS total_allocated_gb,
+
+       catalogue_quota_gb,
+       CASE WHEN catalogue_quota_gb > 0
+            THEN TRUNC(main_quota_gb / catalogue_quota_gb) END        AS main_quota_renewals,
+
+       edr_sessions,
+       cons_e                                                         AS total_consumed_gb,
+       ROUND(cons_e / NULLIF(allocated_gb,0) * 100, 2)                AS consumption_pct,
+       allocated_gb - cons_e                                          AS variance_gb,
+       ROUND((allocated_gb - cons_e) / NULLIF(allocated_gb,0) * 100, 2) AS variance_pct,
+
+       CASE WHEN allocated_gb = 0 AND cons_e = 0 THEN 'Both not found'
+            WHEN allocated_gb = 0                THEN 'No allocated found'
+            WHEN cons_e = 0                      THEN 'No consumption found'
+            WHEN cons_e >= allocated_gb          THEN 'Finisher'
+            ELSE 'Non-Finisher' END                                   AS finisher_status,
+       CASE WHEN allocated_gb = 0 OR cons_e = 0
+              OR cons_e >= allocated_gb THEN NULL
+            WHEN cons_e / allocated_gb < 0.25 THEN 'CAT1'
+            WHEN cons_e / allocated_gb < 0.50 THEN 'CAT2'
+            WHEN cons_e / allocated_gb < 0.75 THEN 'CAT3'
+            ELSE                                   'CAT4'
+       END                                                            AS consumption_category
+FROM   calc
+ORDER  BY BILLCYCLE, MSISDN;
