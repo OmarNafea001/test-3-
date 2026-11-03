@@ -1,151 +1,278 @@
+ALTER SESSION ENABLE PARALLEL QUERY;
 
-#!/bin/bash
+WITH params AS (
+    SELECT /*+ PARALLEL(f 32) */ TRUNC(MAX(f.RUN_DATE)) AS ref_date
+    FROM   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
+),
 
-file_name=/apps/raidprd/raid-prj/scripts/logs/$1_PI_ADSL_TE_INVOICE_VALIDATION.log
+cycles AS (
+    -- bc = bill cycle, e = END day of cycle (31 = last day of month -> LAST_DAY handles 28/29/30/31)
+    SELECT '01' AS bc, 31 AS e FROM dual UNION ALL
+    SELECT '02',       15      FROM dual UNION ALL   -- 16 -> 15
+    SELECT '04',        3      FROM dual UNION ALL   -- 4  -> 3
+    SELECT '07',        6      FROM dual UNION ALL   -- 7  -> 6
+    SELECT '09',       20      FROM dual UNION ALL   -- 21 -> 20 (to be confirmed)
+    SELECT '11',       10      FROM dual UNION ALL   -- 11 -> 10
+    SELECT '25',       24      FROM dual             -- 25 -> 24
+),
 
-# Oracle connection variables
-DB_USER="RP7VFEPIDAT"
-DB_PASS="RP7VFEPIDAT"
-DB_SID="RAIDDB"
+-- >>> CHOOSE THE BILL CYCLES TO RUN HERE <<<
+cycle_sel AS (
+    SELECT bc, e
+    FROM   cycles
+    WHERE  bc IN ('01','02','04','07','09','11','25')            -- e.g. ('01') or ('01','07','25')
+),
 
-# Step 1: Check if QUOTA_NAME_lkp has data for this date
-ROW_COUNT=$($ORACLE_HOME/bin/sqlplus -s "$DB_USER/$DB_PASS@$DB_SID" <<EOF
-SET HEADING OFF FEEDBACK OFF VERIFY OFF ECHO OFF
-SELECT COUNT(*) FROM RP7VFEPIDAT.QUOTA_NAME_lkp
-WHERE "TIME"  = TO_DATE('$1','YYYYMMDD');
-EXIT;
-EOF
+cycle_cand AS (
+    SELECT c.bc, c.e, p.ref_date,
+           CASE WHEN c.e = 31
+                THEN LAST_DAY(TRUNC(p.ref_date,'MM'))
+                ELSE TRUNC(p.ref_date,'MM') + c.e - 1 END                 AS end_this_month,
+           CASE WHEN c.e = 31
+                THEN LAST_DAY(ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1))
+                ELSE ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1) + c.e - 1 END  AS end_prev_month
+    FROM   cycle_sel c CROSS JOIN params p
+),
+
+cycle_win AS (
+    SELECT bc, cycle_start, cycle_end,
+           -- BSCS RUN_DATE is a number (YYYYMMDD), so keep the window as numbers too
+           TO_NUMBER(TO_CHAR(cycle_start,'YYYYMMDD')) AS cs_num,
+           TO_NUMBER(TO_CHAR(cycle_end,  'YYYYMMDD')) AS ce_num
+    FROM (
+        SELECT bc, cycle_end,
+               CASE WHEN e = 31 THEN TRUNC(cycle_end,'MM')
+                    ELSE ADD_MONTHS(cycle_end,-1) + 1 END AS cycle_start
+        FROM (
+            SELECT bc, e,
+                   CASE WHEN end_this_month <= ref_date
+                        THEN end_this_month ELSE end_prev_month END AS cycle_end
+            FROM cycle_cand
+        )
+    )
+),
+
+bounds AS (
+    SELECT MIN(cycle_start) AS min_start, MAX(cycle_end) AS max_end,
+           MIN(cs_num)      AS min_num,   MAX(ce_num)    AS max_num
+    FROM   cycle_win
+),
+
+-- ---------------------------------------------------------------------
+-- BILLING - LAYER 1: postpaid rows inside the bill period of their own
+-- bill cycle only (BC01 rows -> BC01 window, BC02 rows -> BC02 window ...)
+-- ---------------------------------------------------------------------
+bscs_post AS (
+    SELECT /*+ MATERIALIZE PARALLEL(b 32) USE_HASH(w) */
+           b.MSISDN, b.RUN_DATE, b.BILLCYCLE, b.PCRF_SERVICE_NAME_EXPECTED,
+           b.STATUS, b.PRICE_GROUP, b.TMCODE_DES,
+           w.cycle_start, w.cycle_end, w.cs_num, w.ce_num
+    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
+    JOIN   cycle_win w
+           ON  w.bc        = b.BILLCYCLE
+           AND b.RUN_DATE >= w.cs_num
+           AND b.RUN_DATE <= w.ce_num
+    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
+    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
+    AND    b.TYPE = 'POST'
+    AND    b.MSISDN NOT LIKE '%CP%'                              -- exclude CP numbers
+),
+
+-- one row per MSISDN = its last postpaid row in the period,
+-- kept only if it was ACTIVE on ANY day of the period
+billing AS (
+    SELECT MSISDN, BILLCYCLE, PCRF_SERVICE_NAME_EXPECTED,
+           cycle_start, cycle_end, cs_num, ce_num
+    FROM (
+        SELECT x.*,
+               ROW_NUMBER() OVER (PARTITION BY x.MSISDN ORDER BY x.RUN_DATE DESC) AS rn,
+               MAX(CASE WHEN x.STATUS = 'ACTIVE' THEN 1 ELSE 0 END)
+                   OVER (PARTITION BY x.MSISDN)                               AS was_active
+        FROM   bscs_post x
+    )
+    WHERE rn = 1
+    AND   was_active = 1
+    AND   NVL(PRICE_GROUP,'x') NOT IN ('TEST PHONES','Pre-paid Test SIM',
+                                       'Test Individuals','Dummy PG')
+    AND   UPPER(NVL(TMCODE_DES,'x')) NOT LIKE '%SDSL%'      -- exclude SDSL
+),
+
+-- ---------------------------------------------------------------------
+-- BILLING - LAYER 2: every prepaid row in the same date range.
+-- If the MSISDN is PRE on any day of ITS period -> drop the whole MSISDN.
+-- (PRE after the period end is ignored.)
+-- ---------------------------------------------------------------------
+bscs_pre AS (
+    SELECT /*+ MATERIALIZE PARALLEL(b 32) */ DISTINCT b.MSISDN, b.RUN_DATE
+    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
+    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
+    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
+    AND    b.TYPE = 'PRE'
+),
+
+billing_ok AS (
+    SELECT b.*
+    FROM   billing b
+    WHERE  NOT EXISTS (
+               SELECT /*+ HASH_AJ */ 1
+               FROM   bscs_pre p
+               WHERE  p.MSISDN    = b.MSISDN
+               AND    p.RUN_DATE >= b.cs_num
+               AND    p.RUN_DATE <= b.ce_num
+           )
+),
+
+-- postpaid Main Bundles only: used for catalogue quota AND as the list of valid PCRF services
+-- services containing _GC_ are removed here (\ escapes _ , otherwise _ means "any character")
+catalogue AS (
+    SELECT /*+ MATERIALIZE */
+           UPPER(TRIM(PCRF_SERVICE_NAME)) AS svc_key,
+           MAX(PCRF_QOUTA_VALUE_GB)       AS catalogue_quota_gb
+    FROM   RP7VFEPIDAT.RD_T_DSL_PRODUCT_CATALOGUE
+    WHERE  PROD_TYPE_NAME = 'Main Bundle'
+    AND    UPPER(PCRF_SERVICE_NAME) NOT LIKE '%_GC_%' 
+   -- AND    UPPER(PCRF_TYPE) = 'POSTPAID'
+    GROUP  BY UPPER(TRIM(PCRF_SERVICE_NAME))
+),
+
+subs AS (
+    SELECT /*+ MATERIALIZE */
+           b.MSISDN,
+           SUBSTR(b.MSISDN, 2) AS edr_msisdn,
+           b.BILLCYCLE,
+           b.cycle_start, b.cycle_end,
+           c.catalogue_quota_gb
+    FROM   billing_ok b
+    LEFT JOIN catalogue c ON c.svc_key = UPPER(TRIM(b.PCRF_SERVICE_NAME_EXPECTED))
+),
+
+win_rows AS (
+    SELECT /*+ PARALLEL(f 32) USE_HASH(f) */
+           s.MSISDN,
+           f.SERVICE_NAME,
+           f.RUN_DATE,
+           f.QUOTA_SUM,
+           CASE WHEN LOWER(f.SERVICE_NAME) LIKE '%double%quota%' THEN 1 ELSE 0 END AS is_double
+    FROM   subs s
+    JOIN   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
+           ON  f.MSISDN   = s.MSISDN
+           AND f.RUN_DATE >= s.cycle_start
+           AND f.RUN_DATE <  s.cycle_end + 1
+    WHERE  f.RUN_DATE >= (SELECT min_start   FROM bounds)
+    AND    f.RUN_DATE <  (SELECT max_end + 1 FROM bounds)
+    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%addon%'
+    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%throttling%'
+    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%promo%'
+    AND    UPPER(f.SERVICE_NAME) NOT LIKE '%_GC_%'    -- also covers double quota
+
+    -- validation: keep only services found in the postpaid Main Bundle catalogue
+    -- (double quota is kept by name, since it is not a Main Bundle)
+    AND   ( LOWER(f.SERVICE_NAME) LIKE '%double%quota%'
+            OR UPPER(TRIM(f.SERVICE_NAME)) IN (SELECT svc_key FROM catalogue) )
+),
+
+-- last quota value of each service in the cycle (not rounded yet)
+svc_last AS (
+    SELECT MSISDN, SERVICE_NAME, is_double,
+           MIN(RUN_DATE) AS first_dt,
+           MAX(RUN_DATE) AS last_dt,
+           MAX(QUOTA_SUM) KEEP (DENSE_RANK LAST ORDER BY RUN_DATE) / 1048576 AS svc_quota_gb
+    FROM   win_rows
+    GROUP  BY MSISDN, SERVICE_NAME, is_double
+),
+
+-- sum first, then round to whole GB
+quota_agg AS (
+    SELECT MSISDN,
+           ROUND(SUM(CASE WHEN is_double = 0 THEN svc_quota_gb END))  AS main_quota_gb,
+           COUNT(CASE WHEN is_double = 0 THEN 1 END)                  AS main_svc_cnt,
+           ROUND(SUM(CASE WHEN is_double = 1 THEN svc_quota_gb END))  AS double_quota_gb,
+           COUNT(CASE WHEN is_double = 1 THEN 1 END)                  AS double_svc_cnt,
+           MAX(CASE WHEN is_double = 0 THEN last_dt END)              AS main_last_date,
+           MAX(CASE WHEN is_double = 1 THEN last_dt END)              AS double_last_date,
+           LISTAGG(CASE WHEN is_double = 0 THEN SERVICE_NAME END, ' > ')
+               WITHIN GROUP (ORDER BY first_dt)                       AS main_services
+    FROM   svc_last
+    GROUP  BY MSISDN
+),
+
+edr_agg AS (
+    SELECT /*+ PARALLEL(e 32) USE_HASH(e) */
+           s.MSISDN,
+           ROUND(SUM(e.QUOTA_USAGE) / 1048576) AS cons_edr_gb,
+           COUNT(*)                            AS edr_sessions
+    FROM   subs s
+    JOIN   RP7VFEPIDAT.PFM_PCRF_EDRS_STG_CONSUM e
+           ON  e.MSISDN = s.edr_msisdn
+           AND e.TIME  >= s.cycle_start
+           AND e.TIME   < s.cycle_end + 1
+    WHERE  e.TIME >= (SELECT min_start   FROM bounds)
+    AND    e.TIME <  (SELECT max_end + 1 FROM bounds)
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%addon%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%throttling%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%promo%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%adn%'
+    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%gift%'
+    AND    UPPER(e.SERVICE_NAME) NOT LIKE '%_GC_%' 
+    GROUP  BY s.MSISDN
+),
+
+calc AS (
+    SELECT s.MSISDN, s.BILLCYCLE, s.cycle_start, s.cycle_end,
+           s.catalogue_quota_gb,
+           q.main_last_date, q.double_last_date,
+           q.main_services,
+           NVL(q.main_svc_cnt,0)                                 AS main_svc_cnt,
+           q.main_quota_gb,
+           NVL(q.double_quota_gb,0)                              AS double_quota_gb,
+           CASE WHEN NVL(q.double_svc_cnt,0) > 0 THEN 1 ELSE 0 END AS has_double,
+           NVL(q.main_quota_gb,0) + NVL(q.double_quota_gb,0)     AS allocated_gb,
+           NVL(e.cons_edr_gb,0)                                  AS cons_e,
+           NVL(e.edr_sessions,0)                                 AS edr_sessions
+    FROM   subs s
+    LEFT JOIN quota_agg q ON q.MSISDN = s.MSISDN    -- keeps customers with no PCRF data
+    LEFT JOIN edr_agg   e ON e.MSISDN = s.MSISDN
 )
 
-ROW_COUNT=$(echo "$ROW_COUNT" | xargs)
+SELECT MSISDN,
+       BILLCYCLE,
+       cycle_start,
+       cycle_end,
+       TO_CHAR(cycle_end,'YYYY-MM')                                   AS cycle_month,
+       TO_CHAR(cycle_end,'FMMonth YYYY','NLS_DATE_LANGUAGE=ENGLISH')  AS cycle_month_name,
 
-if [ "$ROW_COUNT" -gt 0 ]; then
-    echo "QUOTA_NAME_LKP already has data for $1. Skipping QUOTA_NAME_lkp.sh..."
-else
-    echo "No data found in QUOTA_NAME_LKP for $1. Running QUOTA_NAME_lkp.sh..."
-    cd /RAIDdata/PI/PCRF_EDRS
-    ./QUOTA_NAME_lkp.sh $1
-fi
+       CASE WHEN main_svc_cnt > 1 THEN 'Yes' ELSE 'No' END            AS service_changed,
+       main_svc_cnt                                                   AS main_services_count,
+       main_services,
 
-# Step 2: Continue with rest of the main script
-$ORACLE_HOME/bin/sqlplus -s > $file_name <<END
-$DB_USER/$DB_PASS@$DB_SID
+       main_last_date                                                 AS main_quota_date,
+       main_quota_gb,
+       CASE WHEN has_double = 1 THEN 'Yes' ELSE 'No' END              AS double_quota,
+       double_last_date                                               AS double_quota_date,
+       double_quota_gb,
+       allocated_gb                                                   AS total_allocated_gb,
 
-INSERT INTO RD_T_TE_INVOICE_VALIDATION
-SELECT DISTINCT RUN_DATE,TE_MSISDN,RADIUS_STATUS ,BILLING_STATUS,CHARGING_STATUS,
-(CASE WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='ACTIVE' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist/DEACTIVE'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
-ELSE '_N' END)CASE_COMMENT,Customer_TYPE,PCRF_STATUS,QUOTA.QUOTA_NAME,te.te_speed AS TE_SPEED,
-REGEXP_SUBSTR(QUOTA.QUOTA_NAME,'[0-9]+M', 1, 1) AS speed
-FROM(
-SELECT DISTINCT TE.RUN_DATE, TE.MSISDN TE_MSISDN, NVL(UPPER(DECODE(RADIUS.STATUS,'0','DeActive','1','Active','2','Suspended',RADIUS.STATUS)), 'Not_Exist') RADIUS_STATUS ,
-NVL(BSCS.STATUS, 'Not_Exist') BILLING_STATUS, NVl(UPPER(CHARGING.STATUS), 'Not_Exist') CHARGING_STATUS,BSCS.TYPE AS Customer_TYPE,TE.te_speed,
-UPPER(DECODE(PCRF.Customer_STATUS,0,'DeActive',1,'Active',2,'Suspended',3,'On-Hold', PCRF.Customer_STATUS)) PCRF_STATUS
-FROM RP7VFEPIDAT.RD_T_TE_DATA_BASE_HISTORICAL  TE
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_BSCS_ADSL WHERE run_date = to_number('$1')) BSCS
-ON TE.MSISDN = BSCS.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_PCRF_FILTERED WHERE RUN_DATE = to_date('$1','YYYYMMDD')) PCRF
-ON TE.MSISDN = PCRF.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_RADIUS WHERE run_date = to_number('$1')) RADIUS
-ON TE.MSISDN = RADIUS.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL where (PACKAGE_TYPE ='DSL Status') AND run_date = to_date('$1','YYYYMMDD')) CHARGING
-ON TE.MSISDN = CHARGING.MSISDN
-)TE
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.QUOTA_NAME_LKP qnl WHERE Time =to_date('$1','YYYYMMDD')) QUOTA
-ON TE_MSISDN = QUOTA.MSISDN
-WHERE run_date = to_date('$1','YYYYMMDD');
+       catalogue_quota_gb,
+       CASE WHEN catalogue_quota_gb > 0
+            THEN TRUNC(main_quota_gb / catalogue_quota_gb) END        AS main_quota_renewals,
 
-COMMIT;
---------------------------------Then
-$ORACLE_HOME/bin/sqlplus -s <<END
-RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
+       edr_sessions,
+       cons_e                                                         AS total_consumed_gb,
+       ROUND(cons_e / NULLIF(allocated_gb,0) * 100, 2)                AS consumption_pct,
+       allocated_gb - cons_e                                          AS variance_gb,
+       ROUND((allocated_gb - cons_e) / NULLIF(allocated_gb,0) * 100, 2) AS variance_pct,
 
-UPDATE  RP7VFEPIDAT.RD_T_TE_INVOICE_VALIDATION rttiv
-SET CUSTOMER_TYPE ='NA'
-WHERE CUSTOMER_TYPE IS NULL;
-
-COMMIT;
-EXIT;
-END;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-LOOKUP: QUOTA_NAME_lkp
--------------------------------------------------
-RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
-INSERT INTO QUOTA_NAME_lkp (TIME,MSISDN, QUOTA_NAME,SOURCE )
-SELECT  /*+ PARALLEL(16) */ TIME,msisdn,QUOTA_NAME, SOURCE
-FROM(
-SELECT /*+ PARALLEL(16) */
-TO_DATE($1,'YYYYMMDD') AS TIME,msisdn, SERVICE_NAME AS QUOTA_NAME, SOURCE,
-row_number() over(PARTITION BY msisdn ORDER BY run_date desc ) r
-FROM (SELECT TO_DATE(to_Char(RUN_DATE),'YYYYMMDD') run_Date,msisdn,PCRF_SERVICE_NAME_EXPECTED  SERVICE_NAME ,
-'BSCS' AS Source
-FROM RP7VFEPIDAT.PFM_BSCS_ADSL pba
-WHERE RUN_DATE =$1
-AND "TYPE" ='POST'
-AND TMCODE_DES  NOT LIKE 'SDSL%'
-AND TMCODE_DES  NOT LIKE 'Cloud%'
-UNION
-SELECT run_date,msisdn,PCRF_SERVICE_ID_EXPECTED SERVICE_NAME,'IN' AS Source
-FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL rtiah
-WHERE  RUN_DATE = TO_DATE($1,'YYYYMMDD')
-AND PACKAGE_TYPE ='Main Bundle'
-UNION
-SELECT /*+ PARALLEL(16) */
-TO_DATE($1,'YYYYMMDD') AS Run_Date,MSISDN,SERVICE_NAME, 'PCRF' AS Source
-FROM (SELECT /*+ PARALLEL(16) */
-MSISDN,BILL_CYCLE,SERVICE_NAME,SVCPKG_NAME,
-VALID_DATE,EXPIRY_DATE,QUOTA_STATUS,RUN_DATE,CUSTOMER_STATUS,THROT_FLAG,PACKAGE_TYPE,
-ROW_NUMBER () OVER (PARTITION BY MSISDN ORDER BY RUN_DATE DESC) r
-FROM RP7VFEPIDAT.PFM_PCRF pp
-WHERE run_date <=  $1
- AND PACKAGE_TYPE ='Main Bundle'
- AND SERVICE_NAME <> 'Serv_DSL_Generic_Promo'
- AND SERVICE_NAME <> 'Serv_DSL_Compensation_Gift'
- AND SERVICE_NAME <> 'Serv_DSL_Throttling'
- AND SERVICE_NAME <> 'ADSL_OnHold'
- AND SERVICE_NAME <> 'Serv_DSL_Double_Quota_Pre'
- AND SERVICE_NAME NOT LIKE  '%Add%'
- AND SERVICE_NAME NOT LIKE  '%DoubleQuota%')
-WHERE r =1))
-WHERE r =1;
-Commit;
-
-
-if i have the following and i want to create customers numbers on our base and do not exist on TE Invoice, mentioning their service name, speed, and their consumption during the invoice month.
-
-and please add their percentage from our total base.  if u have questions ask me 
-exit;
-END
+       CASE WHEN allocated_gb = 0 AND cons_e = 0 THEN 'Both not found'
+            WHEN allocated_gb = 0                THEN 'No allocated found'
+            WHEN cons_e = 0                      THEN 'No consumption found'
+            WHEN cons_e >= allocated_gb          THEN 'Finisher'
+            ELSE 'Non-Finisher' END                                   AS finisher_status,
+       CASE WHEN allocated_gb = 0 OR cons_e = 0
+              OR cons_e >= allocated_gb THEN NULL
+            WHEN cons_e / allocated_gb < 0.25 THEN 'CAT1'
+            WHEN cons_e / allocated_gb < 0.50 THEN 'CAT2'
+            WHEN cons_e / allocated_gb < 0.75 THEN 'CAT3'
+            ELSE                                   'CAT4'
+       END                                                            AS consumption_category
+FROM   calc
+ORDER  BY BILLCYCLE, MSISDN;
