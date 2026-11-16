@@ -1,288 +1,209 @@
-ALTER SESSION ENABLE PARALLEL QUERY;
+import os
+import sys
 
-WITH params AS (
-    SELECT /*+ PARALLEL(f 32) */ TRUNC(MAX(f.RUN_DATE)) AS ref_date
-    FROM   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
-),
-
-cycles AS (
-    -- bc = bill cycle, e = END day of cycle (31 = last day of month -> LAST_DAY handles 28/29/30/31)
-    SELECT '01' AS bc, 31 AS e FROM dual UNION ALL
-    SELECT '02',       15      FROM dual UNION ALL   -- 16 -> 15
-    SELECT '04',        3      FROM dual UNION ALL   -- 4  -> 3
-    SELECT '07',        6      FROM dual UNION ALL   -- 7  -> 6
-    SELECT '09',       20      FROM dual UNION ALL   -- 21 -> 20 (to be confirmed)
-    SELECT '11',       10      FROM dual UNION ALL   -- 11 -> 10
-    SELECT '25',       24      FROM dual             -- 25 -> 24
-),
-
--- >>> CHOOSE THE BILL CYCLES TO RUN HERE <<<
-cycle_sel AS (
-    SELECT bc, e
-    FROM   cycles
-    WHERE  bc IN ('01','02','04','07','09','11','25')            -- e.g. ('01') or ('01','07','25')
-),
-
-cycle_cand AS (
-    SELECT c.bc, c.e, p.ref_date,
-           CASE WHEN c.e = 31
-                THEN LAST_DAY(TRUNC(p.ref_date,'MM'))
-                ELSE TRUNC(p.ref_date,'MM') + c.e - 1 END                 AS end_this_month,
-           CASE WHEN c.e = 31
-                THEN LAST_DAY(ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1))
-                ELSE ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1) + c.e - 1 END  AS end_prev_month
-    FROM   cycle_sel c CROSS JOIN params p
-),
-
-cycle_win AS (
-    SELECT bc, cycle_start, cycle_end,
-           -- BSCS RUN_DATE is a number (YYYYMMDD), so keep the window as numbers too
-           TO_NUMBER(TO_CHAR(cycle_start,'YYYYMMDD')) AS cs_num,
-           TO_NUMBER(TO_CHAR(cycle_end,  'YYYYMMDD')) AS ce_num
-    FROM (
-        SELECT bc, cycle_end,
-               CASE WHEN e = 31 THEN TRUNC(cycle_end,'MM')
-                    ELSE ADD_MONTHS(cycle_end,-1) + 1 END AS cycle_start
-        FROM (
-            SELECT bc, e,
-                   CASE WHEN end_this_month <= ref_date
-                        THEN end_this_month ELSE end_prev_month END AS cycle_end
-            FROM cycle_cand
-        )
-    )
-),
-
-bounds AS (
-    SELECT MIN(cycle_start) AS min_start, MAX(cycle_end) AS max_end,
-           MIN(cs_num)      AS min_num,   MAX(ce_num)    AS max_num
-    FROM   cycle_win
-),
-
--- ---------------------------------------------------------------------
--- BILLING - LAYER 1: postpaid rows inside the bill period of their own
--- bill cycle only (BC01 rows -> BC01 window, BC02 rows -> BC02 window ...)
--- ---------------------------------------------------------------------
-bscs_post AS (
-    SELECT /*+ MATERIALIZE PARALLEL(b 32) USE_HASH(w) */
-           b.MSISDN, b.RUN_DATE, b.BILLCYCLE, b.PCRF_SERVICE_NAME_EXPECTED,
-           b.STATUS, b.PRICE_GROUP, b.TMCODE_DES,
-           w.cycle_start, w.cycle_end, w.cs_num, w.ce_num
-    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
-    JOIN   cycle_win w
-           ON  w.bc        = b.BILLCYCLE
-           AND b.RUN_DATE >= w.cs_num
-           AND b.RUN_DATE <= w.ce_num
-    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
-    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
-    AND    b.TYPE = 'POST'
-    AND    b.MSISDN NOT LIKE '%CP%'                              -- exclude CP numbers
-),
-
--- one row per MSISDN = its last postpaid row in the period,
--- kept only if it was ACTIVE on ANY day of the period
-billing AS (
-    SELECT MSISDN, BILLCYCLE, PCRF_SERVICE_NAME_EXPECTED,
-           cycle_start, cycle_end, cs_num, ce_num
-    FROM (
-        SELECT x.*,
-               ROW_NUMBER() OVER (PARTITION BY x.MSISDN ORDER BY x.RUN_DATE DESC) AS rn,
-               MAX(CASE WHEN x.STATUS = 'ACTIVE' THEN 1 ELSE 0 END)
-                   OVER (PARTITION BY x.MSISDN)                               AS was_active
-        FROM   bscs_post x
-    )
-    WHERE rn = 1
-    AND   was_active = 1
-    AND   NVL(PRICE_GROUP,'x') NOT IN ('TEST PHONES','Pre-paid Test SIM',
-                                       'Test Individuals','Dummy PG')
-    AND   UPPER(NVL(TMCODE_DES,'x')) NOT LIKE '%SDSL%'      -- exclude SDSL
-),
-
--- ---------------------------------------------------------------------
--- BILLING - LAYER 2: every prepaid row in the same date range.
--- If the MSISDN is PRE on any day of ITS period -> drop the whole MSISDN.
--- (PRE after the period end is ignored.)
--- ---------------------------------------------------------------------
-bscs_pre AS (
-    SELECT /*+ MATERIALIZE PARALLEL(b 32) */ DISTINCT b.MSISDN, b.RUN_DATE
-    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
-    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
-    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
-    AND    b.TYPE = 'PRE'
-),
-
-billing_ok AS (
-    SELECT b.*
-    FROM   billing b
-    WHERE  NOT EXISTS (
-               SELECT /*+ HASH_AJ */ 1
-               FROM   bscs_pre p
-               WHERE  p.MSISDN    = b.MSISDN
-               AND    p.RUN_DATE >= b.cs_num
-               AND    p.RUN_DATE <= b.ce_num
-           )
-),
-
--- postpaid Main Bundles only: used for catalogue quota AND as the list of valid PCRF services
--- services containing _GC_ are removed here (INSTR searches the text literally)
-catalogue AS (
-    SELECT /*+ MATERIALIZE */
-           UPPER(TRIM(PCRF_SERVICE_NAME)) AS svc_key,
-           MAX(PCRF_QOUTA_VALUE_GB)       AS catalogue_quota_gb
-    FROM   RP7VFEPIDAT.RD_T_DSL_PRODUCT_CATALOGUE
-    WHERE  PROD_TYPE_NAME = 'Main Bundle'
-    AND    INSTR(UPPER(PCRF_SERVICE_NAME), '_GC_') = 0
-   -- AND    UPPER(PCRF_TYPE) = 'POSTPAID'
-    GROUP  BY UPPER(TRIM(PCRF_SERVICE_NAME))
-),
-
-subs AS (
-    SELECT /*+ MATERIALIZE */
-           b.MSISDN,
-           SUBSTR(b.MSISDN, 2) AS edr_msisdn,
-           b.BILLCYCLE,
-           b.cycle_start, b.cycle_end,
-           c.catalogue_quota_gb
-    FROM   billing_ok b
-    LEFT JOIN catalogue c ON c.svc_key = UPPER(TRIM(b.PCRF_SERVICE_NAME_EXPECTED))
-),
-
-win_rows AS (
-    SELECT /*+ PARALLEL(f 32) USE_HASH(f) */
-           s.MSISDN,
-           f.SERVICE_NAME,
-           f.RUN_DATE,
-           f.QUOTA_SUM,
-           CASE WHEN LOWER(f.SERVICE_NAME) LIKE '%double%quota%' THEN 1 ELSE 0 END AS is_double
-    FROM   subs s
-    JOIN   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
-           ON  f.MSISDN   = s.MSISDN
-           AND f.RUN_DATE >= s.cycle_start
-           AND f.RUN_DATE <  s.cycle_end + 1
-    WHERE  f.RUN_DATE >= (SELECT min_start   FROM bounds)
-    AND    f.RUN_DATE <  (SELECT max_end + 1 FROM bounds)
-    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%addon%'
-    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%throttling%'
-    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%promo%'
-    AND    INSTR(UPPER(f.SERVICE_NAME), '_GC_') = 0   -- also covers double quota
-
-    -- validation: keep only services found in the postpaid Main Bundle catalogue
-    -- (double quota is kept by name, since it is not a Main Bundle)
-    AND   ( LOWER(f.SERVICE_NAME) LIKE '%double%quota%'
-            OR UPPER(TRIM(f.SERVICE_NAME)) IN (SELECT svc_key FROM catalogue) )
-),
-
--- last quota value of each service in the cycle (not rounded yet)
-svc_last AS (
-    SELECT MSISDN, SERVICE_NAME, is_double,
-           MIN(RUN_DATE) AS first_dt,
-           MAX(RUN_DATE) AS last_dt,
-           MAX(QUOTA_SUM) KEEP (DENSE_RANK LAST ORDER BY RUN_DATE) / 1048576 AS svc_quota_gb
-    FROM   win_rows
-    GROUP  BY MSISDN, SERVICE_NAME, is_double
-),
-
--- sum first, then round to whole GB
-quota_agg AS (
-    SELECT MSISDN,
-           ROUND(SUM(CASE WHEN is_double = 0 THEN svc_quota_gb END))  AS main_quota_gb,
-           COUNT(CASE WHEN is_double = 0 THEN 1 END)                  AS main_svc_cnt,
-           ROUND(SUM(CASE WHEN is_double = 1 THEN svc_quota_gb END))  AS double_quota_gb,
-           COUNT(CASE WHEN is_double = 1 THEN 1 END)                  AS double_svc_cnt,
-           MAX(CASE WHEN is_double = 0 THEN last_dt END)              AS main_last_date,
-           MAX(CASE WHEN is_double = 1 THEN last_dt END)              AS double_last_date,
-           LISTAGG(CASE WHEN is_double = 0 THEN SERVICE_NAME END, ' > ')
-               WITHIN GROUP (ORDER BY first_dt)                       AS main_services
-    FROM   svc_last
-    GROUP  BY MSISDN
-),
-
-edr_agg AS (
-    -- QUOTA_CONSUMPTION is a running total per service:
-    -- take its highest value per service (= final total, records can arrive out of order),
-    -- then sum all services of the MSISDN
-    SELECT MSISDN,
-           ROUND(SUM(svc_cons) / 1048576) AS cons_edr_gb,
-           SUM(svc_sessions)              AS edr_sessions
-    FROM (
-    SELECT /*+ PARALLEL(e 32) USE_HASH(e) */
-           s.MSISDN,
-           e.SERVICE_NAME,
-           MAX(e.QUOTA_CONSUMPTION)            AS svc_cons,
-           COUNT(*)                            AS svc_sessions
-    FROM   subs s
-    JOIN   RP7VFEPIDAT.PFM_PCRF_EDRS_STG_CONSUM e
-           ON  e.MSISDN = s.edr_msisdn
-           AND e.TIME  >= s.cycle_start
-           AND e.TIME   < s.cycle_end + 1
-    WHERE  e.TIME >= (SELECT min_start   FROM bounds)
-    AND    e.TIME <  (SELECT max_end + 1 FROM bounds)
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%addon%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%throttling%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%promo%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%adn%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%gift%'
-    AND    INSTR(UPPER(e.SERVICE_NAME), '_GC_') = 0
-    GROUP  BY s.MSISDN, e.SERVICE_NAME
-    )
-    GROUP  BY MSISDN
-),
-
-calc AS (
-    SELECT s.MSISDN, s.BILLCYCLE, s.cycle_start, s.cycle_end,
-           s.catalogue_quota_gb,
-           q.main_last_date, q.double_last_date,
-           q.main_services,
-           NVL(q.main_svc_cnt,0)                                 AS main_svc_cnt,
-           q.main_quota_gb,
-           NVL(q.double_quota_gb,0)                              AS double_quota_gb,
-           CASE WHEN NVL(q.double_svc_cnt,0) > 0 THEN 1 ELSE 0 END AS has_double,
-           NVL(q.main_quota_gb,0) + NVL(q.double_quota_gb,0)     AS allocated_gb,
-           NVL(e.cons_edr_gb,0)                                  AS cons_e,
-           NVL(e.edr_sessions,0)                                 AS edr_sessions
-    FROM   subs s
-    LEFT JOIN quota_agg q ON q.MSISDN = s.MSISDN    -- keeps customers with no PCRF data
-    LEFT JOIN edr_agg   e ON e.MSISDN = s.MSISDN
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
 )
+sys.path.insert(0, PROJECT_ROOT)
 
-SELECT MSISDN,
-       BILLCYCLE,
-       cycle_start,
-       cycle_end,
-       TO_CHAR(cycle_end,'YYYY-MM')                                   AS cycle_month,
-       TO_CHAR(cycle_end,'FMMonth YYYY','NLS_DATE_LANGUAGE=ENGLISH')  AS cycle_month_name,
+import duckdb
+import argparse
+import glob
+from datetime import datetime
+from config.duckdb_connection import duckdb_connection
+from utils.logger import get_logger
+from utils.send_mail import send_mail
+from utils.export_to_oracle import prepare_ctl
+from utils.export_to_oracle import run_sqlldr
+from utils.dump_vs_database import validate_loaded_data
 
-       CASE WHEN main_svc_cnt > 1 THEN 'Yes' ELSE 'No' END            AS service_changed,
-       main_svc_cnt                                                   AS main_services_count,
-       main_services,
 
-       main_last_date                                                 AS main_quota_date,
-       main_quota_gb,
-       CASE WHEN has_double = 1 THEN 'Yes' ELSE 'No' END              AS double_quota,
-       double_last_date                                               AS double_quota_date,
-       double_quota_gb,
-       allocated_gb                                                   AS total_allocated_gb,
+# Positional mapping (read_csv with header=False -> column00 .. column19)
+#    rdrCONTRACT_ID          (index 1)
+#    rdrIMSI                 (index 2)
+#    rdrRUNNING_NUMBER       (index 3)
+#    rdrTM_CODE              (index 7)
+#    rdrSUB_STATUS           (index 8)
+#    rdrSUB_TYPE             (index 9)
+#    rdrMSISDN               (index 10)
+#    rdrSN_CODE              (index 11)
+#    rdrBILL_CYCLE           (index 14)
+#    TMCODE_DES              (index 16)
+#    rdrACTIVE_SERVICE_LIST  (index 19)
+#    rdrPRICE_GROUP          (index 20)
 
-       catalogue_quota_gb,
-       CASE WHEN catalogue_quota_gb > 0
-            THEN TRUNC(main_quota_gb / catalogue_quota_gb) END        AS main_quota_renewals,
 
-       edr_sessions,
-       cons_e                                                         AS total_consumed_gb,
-       ROUND(cons_e / NULLIF(allocated_gb,0) * 100, 2)                AS consumption_pct,
-       allocated_gb - cons_e                                          AS variance_gb,
-       ROUND((allocated_gb - cons_e) / NULLIF(allocated_gb,0) * 100, 2) AS variance_pct,
+def load_bscs_profiles_adsl(run_date: str, con=None):
 
-       CASE WHEN allocated_gb = 0 AND cons_e = 0 THEN 'Both not found'
-            WHEN allocated_gb = 0                THEN 'No allocated found'
-            WHEN cons_e = 0                      THEN 'No consumption found'
-            WHEN cons_e >= allocated_gb          THEN 'Finisher'
-            ELSE 'Non-Finisher' END                                   AS finisher_status,
-       CASE WHEN allocated_gb = 0 OR cons_e = 0
-              OR cons_e >= allocated_gb THEN NULL
-            WHEN cons_e / allocated_gb < 0.25 THEN 'CAT1'
-            WHEN cons_e / allocated_gb < 0.50 THEN 'CAT2'
-            WHEN cons_e / allocated_gb < 0.75 THEN 'CAT3'
-            ELSE                                   'CAT4'
-       END                                                            AS consumption_category
-FROM   calc
-ORDER  BY BILLCYCLE, MSISDN;
+    start_time = datetime.now()
+    logger = get_logger(
+        flow="bscs_profiles_adsl",
+        log_dir=None,
+        run_date=run_date
+    )
+
+    try:
+        if con is None:
+            con = duckdb_connection()
+
+        run_date_formatted = f"{run_date[:4]}-{run_date[4:6]}-{run_date[6:]}"
+        csv_path = f"/project/PLATFORM_INTEGRITY/exports/bscs_profiles_adsl_{run_date}.csv"
+        
+        file_path = (
+            f"/RAIDdata/PI/BSCS/raw/"
+            f"CONTRACT_PROFILE_{run_date}.csv.gz"
+        )
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Input file not found: {file_path}")
+
+        logger.info(f"Reading {file_path} ..")
+
+        con.execute(f"""
+        CREATE OR REPLACE TABLE bscs_profiles_adsl_data AS
+        WITH src AS (
+        SELECT
+            TRIM(column00) AS CONTRACT_ID,
+            RTRIM(TRIM(column09), '`') AS MSISDN,
+            TRIM(column07) AS SUB_STATUS,
+            TRIM(column06) AS TM_CODE,
+            TRIM(column08) AS SUB_TYPE,
+            TRIM(column10) AS SN_CODE,
+            TRIM(column13) AS BILL_CYCLE,
+            TRIM(column15) AS TMCODE_DES,
+            TRIM(column18) AS ACTIVE_SERVICE_LIST,
+            TRIM(column19) AS PRICE_GROUP
+        FROM read_csv_auto(
+            '{file_path}',
+            delim='|',
+            header=FALSE,
+            all_varchar=TRUE,
+            quote='',
+            escape='',
+            null_padding=TRUE,
+            ignore_errors=TRUE
+        )
+        ),
+
+        -- one value per TM_CODE so the join can never duplicate rows
+        lkp AS (
+            SELECT
+                TRIM(TRY_CAST(TMCODE AS VARCHAR)) AS TMCODE,
+                ANY_VALUE(TRIM(TRY_CAST(PCRF_SERVICE_NAME AS VARCHAR))) AS PCRF_SERVICE_NAME
+            FROM lkp17
+            GROUP BY 1
+        )
+
+        SELECT
+            TRY_CAST('{run_date_formatted}' AS DATE) AS RUN_DATE,
+
+            src.CONTRACT_ID,
+            src.MSISDN,
+            src.TM_CODE,
+
+            CASE
+                WHEN UPPER(src.SUB_STATUS) = 'A' THEN 'ACTIVE'
+                WHEN UPPER(src.SUB_STATUS) = 'S' THEN 'SUSPENDED'
+                ELSE 'DEACTIVE'
+            END AS STATUS,
+
+            CASE
+                WHEN src.SUB_TYPE = 'PREPAID'    THEN 'PRE'
+                WHEN src.SUB_TYPE = 'POSTPAID'   THEN 'POST'
+                WHEN src.SUB_TYPE = 'C2BCONTROL' THEN 'CTRL'
+                WHEN src.SUB_TYPE = 'CONTROL'    THEN 'CTRL'
+                ELSE src.SUB_TYPE
+            END AS TYPE,
+
+            src.BILL_CYCLE,
+            src.TMCODE_DES AS TM_CODE_DESC,
+            src.PRICE_GROUP,
+
+            CASE
+                WHEN l.TMCODE IS NOT NULL THEN l.PCRF_SERVICE_NAME
+                ELSE '_N'
+            END AS PCRF_SERVICE_NAME_EXPECTED,
+
+            CASE
+                WHEN (',' || src.ACTIVE_SERVICE_LIST || ',') LIKE '%,505,%'
+                OR (',' || src.ACTIVE_SERVICE_LIST || ',') LIKE '%,507,%'
+                THEN 1
+                ELSE 0
+            END AS AUTO_ACTIVATION_FLAG
+
+        FROM src
+        LEFT JOIN lkp l
+            ON src.TM_CODE = l.TMCODE
+
+        WHERE src.SN_CODE = '504' AND UPPER(src.SUB_STATUS) IN ('A','S');
+        """)
+
+        count = con.execute(
+            "SELECT COUNT(*) FROM bscs_profiles_adsl_data"
+        ).fetchone()[0]
+        logger.info(f"Total processed rows: {count}")
+
+        con.execute(f"""
+        COPY (
+            SELECT RUN_DATE, CONTRACT_ID, MSISDN, TM_CODE, STATUS, TYPE,
+                   BILL_CYCLE, TM_CODE_DESC, PRICE_GROUP,
+                   PCRF_SERVICE_NAME_EXPECTED, AUTO_ACTIVATION_FLAG
+            FROM bscs_profiles_adsl_data
+        )
+        TO '{csv_path}'
+        (DELIMITER ',', HEADER TRUE, QUOTE '"', ESCAPE '"');
+        """)
+
+        print("Copied successfully..")
+
+        if count == 0:
+            logger.info("No bscs_profiles_adsl data processed!")
+            raise ValueError("No bscs_profiles_adsl data processed (0 rows)")
+
+        
+        # logger.info("Inserting into PI.BSCS_PROFILES_ADSL table ..")
+        # ctl_file = prepare_ctl("bscs_profiles_adsl", run_date)
+        # run_sqlldr("bscs_profiles_adsl", run_date, ctl_file=ctl_file)
+        # logger.info("Insertion done")
+        # logger.info("Validating inserted data ..")
+
+        # validate_loaded_data(
+        #     flow_name="bscs_profiles_adsl",
+        #     run_date=run_date,
+        #     expected_rows=count,
+        #     logger=logger)
+
+        # logger.info("Inserted data validated successfully.")
+
+        # end_time = datetime.now()
+        # logger.info("bscs_profiles_adsl finished")
+        # logger.info(f"Total duration: {end_time - start_time}")
+        # send_mail(
+        #     subject="BSCS_PROFILES_ADSL Flow Finished",
+        #     content=f"""
+        #         Run Date : {run_date}
+        #         Rows      : {count}
+        #         DB Validation : Passed
+        #         Duration  : {end_time - start_time}""")
+
+        return con.table("bscs_profiles_adsl_data")
+
+    except Exception as e:
+        logger.exception(
+            f"BSCS_PROFILES_ADSL failed for run_date= {run_date} | error= {str(e)}"
+        )
+        send_mail(
+            subject="BSCS_PROFILES_ADSL Flow Failed",
+            content=f"""
+            Run Date : {run_date}
+            Error:
+            {str(e)}
+            """)
+        raise
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run_date", required=True)
+    args = parser.parse_args()
+    load_bscs_profiles_adsl(run_date=args.run_date)
