@@ -1,276 +1,111 @@
-WITH params AS (
-    SELECT /*+ PARALLEL(f 32) */ TRUNC(MAX(f.RUN_DATE)) AS ref_date
-    FROM   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
-),
-
-cycles AS (
-    -- bc = bill cycle, e = END day of cycle (31 = last day of month -> LAST_DAY handles 28/29/30/31)
-    SELECT '01' AS bc, 31 AS e FROM dual UNION ALL
-    SELECT '02',       15      FROM dual UNION ALL   -- 16 -> 15
-    SELECT '04',        3      FROM dual UNION ALL   -- 4  -> 3
-    SELECT '07',        6      FROM dual UNION ALL   -- 7  -> 6
-    SELECT '09',       20      FROM dual UNION ALL   -- 21 -> 20 
-    SELECT '11',       10      FROM dual UNION ALL   -- 11 -> 10
-    SELECT '25',       24      FROM dual             -- 25 -> 24
-),
-
--- >>> CHOOSE THE BILL CYCLES TO RUN HERE <<<
-cycle_sel AS (
-    SELECT bc, e
-    FROM   cycles
-    WHERE  bc IN ('01','02','04','07','09','11','25')            -- e.g. ('01') or ('01','07','25')
-),
-
-cycle_cand AS (
-    SELECT c.bc, c.e, p.ref_date,
-           CASE WHEN c.e = 31
-                THEN LAST_DAY(TRUNC(p.ref_date,'MM'))
-                ELSE TRUNC(p.ref_date,'MM') + c.e - 1 END                 AS end_this_month,
-           CASE WHEN c.e = 31
-                THEN LAST_DAY(ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1))
-                ELSE ADD_MONTHS(TRUNC(p.ref_date,'MM'),-1) + c.e - 1 END  AS end_prev_month
-    FROM   cycle_sel c CROSS JOIN params p
-),
-
-cycle_win AS (
-    SELECT bc, cycle_start, cycle_end,
-           -- BSCS RUN_DATE is a number (YYYYMMDD), so keep the window as numbers too
-           TO_NUMBER(TO_CHAR(cycle_start,'YYYYMMDD')) AS cs_num,
-           TO_NUMBER(TO_CHAR(cycle_end,  'YYYYMMDD')) AS ce_num
-    FROM (
-        SELECT bc, cycle_end,
-               CASE WHEN e = 31 THEN TRUNC(cycle_end,'MM')
-                    ELSE ADD_MONTHS(cycle_end,-1) + 1 END AS cycle_start
-        FROM (
-            SELECT bc, e,
-                   CASE WHEN end_this_month <= ref_date
-                        THEN end_this_month ELSE end_prev_month END AS cycle_end
-            FROM cycle_cand
-        )
-    )
-),
-
-bounds AS (
-    SELECT MIN(cycle_start) AS min_start, MAX(cycle_end) AS max_end,
-           MIN(cs_num)      AS min_num,   MAX(ce_num)    AS max_num
-    FROM   cycle_win
-),
-
--- ---------------------------------------------------------------------
--- BILLING - LAYER 1: postpaid rows inside the bill period of their own
--- bill cycle only (BC01 rows -> BC01 window, BC02 rows -> BC02 window ...)
--- ---------------------------------------------------------------------
-bscs_post AS (
-    SELECT /*+ MATERIALIZE PARALLEL(b 32) USE_HASH(w) */
-           b.MSISDN, b.RUN_DATE, b.BILLCYCLE, b.PCRF_SERVICE_NAME_EXPECTED,
-           b.STATUS, b.PRICE_GROUP, b.TMCODE_DES,
-           w.cycle_start, w.cycle_end, w.cs_num, w.ce_num
-    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
-    JOIN   cycle_win w
-           ON  w.bc        = b.BILLCYCLE
-           AND b.RUN_DATE >= w.cs_num
-           AND b.RUN_DATE <= w.ce_num
-    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
-    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
-    AND    b.TYPE = 'POST'
-    AND    b.MSISDN NOT LIKE '%CP%'                              -- exclude CP numbers
-),
-
--- one row per MSISDN = its last postpaid row in the period,
--- kept only if it was ACTIVE on ANY day of the period
-billing AS (
-    SELECT MSISDN, BILLCYCLE, PCRF_SERVICE_NAME_EXPECTED,
-           cycle_start, cycle_end, cs_num, ce_num
-    FROM (
-        SELECT x.*,
-               ROW_NUMBER() OVER (PARTITION BY x.MSISDN ORDER BY x.RUN_DATE DESC) AS rn,
-               MAX(CASE WHEN x.STATUS = 'ACTIVE' THEN 1 ELSE 0 END)
-                   OVER (PARTITION BY x.MSISDN)                               AS was_active
-        FROM   bscs_post x
-    )
-    WHERE rn = 1
-    AND   was_active = 1
-    AND   NVL(PRICE_GROUP,'x') NOT IN ('TEST PHONES','Pre-paid Test SIM',
-                                       'Test Individuals','Dummy PG')
-    AND   UPPER(NVL(TMCODE_DES,'x')) NOT LIKE '%SDSL%'      -- exclude SDSL
-),
-
--- ---------------------------------------------------------------------
--- BILLING - LAYER 2: every prepaid row in the same date range.
--- If the MSISDN is PRE on any day of ITS period -> drop the whole MSISDN.
--- (PRE after the period end is ignored.)
--- ---------------------------------------------------------------------
-bscs_pre AS (
-    SELECT /*+ MATERIALIZE PARALLEL(b 32) */ DISTINCT b.MSISDN, b.RUN_DATE
-    FROM   RP7VFEPIDAT.PFM_BSCS_ADSL b
-    WHERE  b.RUN_DATE >= (SELECT min_num FROM bounds)
-    AND    b.RUN_DATE <= (SELECT max_num FROM bounds)
-    AND    b.TYPE = 'PRE'
-),
-
-billing_ok AS (
-    SELECT b.*
-    FROM   billing b
-    WHERE  NOT EXISTS (
-               SELECT /*+ HASH_AJ */ 1
-               FROM   bscs_pre p
-               WHERE  p.MSISDN    = b.MSISDN
-               AND    p.RUN_DATE >= b.cs_num
-               AND    p.RUN_DATE <= b.ce_num
-           )
-),
-
--- postpaid Main Bundles only: used for catalogue quota AND as the list of valid PCRF services
--- services containing _GC_ are removed here (\ escapes _ , otherwise _ means "any character")
-catalogue AS (
-    SELECT /*+ MATERIALIZE */
-           UPPER(TRIM(PCRF_SERVICE_NAME)) AS svc_key,
-           MAX(PCRF_QOUTA_VALUE_GB)       AS catalogue_quota_gb
-    FROM   RP7VFEPIDAT.RD_T_DSL_PRODUCT_CATALOGUE
-    WHERE  PROD_TYPE_NAME = 'Main Bundle'
-    AND    UPPER(PCRF_SERVICE_NAME) NOT LIKE '%_GC_%' 
-   -- AND    UPPER(PCRF_TYPE) = 'POSTPAID'
-    GROUP  BY UPPER(TRIM(PCRF_SERVICE_NAME))
-),
-
-subs AS (
-    SELECT /*+ MATERIALIZE */
-           b.MSISDN,
-           SUBSTR(b.MSISDN, 2) AS edr_msisdn,
-           b.BILLCYCLE,
-           b.cycle_start, b.cycle_end,
-           c.catalogue_quota_gb
-    FROM   billing_ok b
-    LEFT JOIN catalogue c ON c.svc_key = UPPER(TRIM(b.PCRF_SERVICE_NAME_EXPECTED))
-),
-
-win_rows AS (
-    SELECT /*+ PARALLEL(f 32) USE_HASH(f) */
-           s.MSISDN,
-           f.SERVICE_NAME,
-           f.RUN_DATE,
-           f.QUOTA_SUM,
-           CASE WHEN LOWER(f.SERVICE_NAME) LIKE '%double%quota%' THEN 1 ELSE 0 END AS is_double
-    FROM   subs s
-    JOIN   RP7VFEPIDAT.PFM_PCRF_CONSUM_FILTERED f
-           ON  f.MSISDN   = s.MSISDN
-           AND f.RUN_DATE >= s.cycle_start
-           AND f.RUN_DATE <  s.cycle_end + 1
-    WHERE  f.RUN_DATE >= (SELECT min_start   FROM bounds)
-    AND    f.RUN_DATE <  (SELECT max_end + 1 FROM bounds)
-    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%addon%'
-    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%throttling%'
-    AND    LOWER(f.SERVICE_NAME) NOT LIKE '%promo%'
-    AND    UPPER(f.SERVICE_NAME) NOT LIKE '%_GC_%'    -- also covers double quota
-
-    -- validation: keep only services found in the postpaid Main Bundle catalogue
-    -- (double quota is kept by name, since it is not a Main Bundle)
-    AND   ( LOWER(f.SERVICE_NAME) LIKE '%double%quota%'
-            OR UPPER(TRIM(f.SERVICE_NAME)) IN (SELECT svc_key FROM catalogue) )
-),
-
--- last quota value of each service in the cycle (not rounded yet)
-svc_last AS (
-    SELECT MSISDN, SERVICE_NAME, is_double,
-           MIN(RUN_DATE) AS first_dt,
-           MAX(RUN_DATE) AS last_dt,
-           MAX(QUOTA_SUM) KEEP (DENSE_RANK LAST ORDER BY RUN_DATE) / 1048576 AS svc_quota_gb
-    FROM   win_rows
-    GROUP  BY MSISDN, SERVICE_NAME, is_double
-),
-
--- sum first, then round to whole GB
-quota_agg AS (
-    SELECT MSISDN,
-           ROUND(SUM(CASE WHEN is_double = 0 THEN svc_quota_gb END))  AS main_quota_gb,
-           COUNT(CASE WHEN is_double = 0 THEN 1 END)                  AS main_svc_cnt,
-           ROUND(SUM(CASE WHEN is_double = 1 THEN svc_quota_gb END))  AS double_quota_gb,
-           COUNT(CASE WHEN is_double = 1 THEN 1 END)                  AS double_svc_cnt,
-           MAX(CASE WHEN is_double = 0 THEN last_dt END)              AS main_last_date,
-           MAX(CASE WHEN is_double = 1 THEN last_dt END)              AS double_last_date,
-           LISTAGG(CASE WHEN is_double = 0 THEN SERVICE_NAME END, ' > ')
-               WITHIN GROUP (ORDER BY first_dt)                       AS main_services
-    FROM   svc_last
-    GROUP  BY MSISDN
-),
-
-edr_agg AS (
-    SELECT /*+ PARALLEL(e 32) USE_HASH(e) */
-           s.MSISDN,
-           ROUND(SUM(e.QUOTA_USAGE) / 1048576) AS cons_edr_gb,
-           COUNT(*)                            AS edr_sessions
-    FROM   subs s
-    JOIN   RP7VFEPIDAT.PFM_PCRF_EDRS_STG_CONSUM e
-           ON  e.MSISDN = s.edr_msisdn
-           AND e.TIME  >= s.cycle_start
-           AND e.TIME   < s.cycle_end + 1
-    WHERE  e.TIME >= (SELECT min_start   FROM bounds)
-    AND    e.TIME <  (SELECT max_end + 1 FROM bounds)
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%addon%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%throttling%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%promo%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%adn%'
-    AND    LOWER(e.SERVICE_NAME) NOT LIKE '%gift%'
-    AND    UPPER(e.SERVICE_NAME) NOT LIKE '%_GC_%' 
-    GROUP  BY s.MSISDN
-),
-
-calc AS (
-    SELECT s.MSISDN, s.BILLCYCLE, s.cycle_start, s.cycle_end,
-           s.catalogue_quota_gb,
-           q.main_last_date, q.double_last_date,
-           q.main_services,
-           NVL(q.main_svc_cnt,0)                                 AS main_svc_cnt,
-           q.main_quota_gb,
-           NVL(q.double_quota_gb,0)                              AS double_quota_gb,
-           CASE WHEN NVL(q.double_svc_cnt,0) > 0 THEN 1 ELSE 0 END AS has_double,
-           NVL(q.main_quota_gb,0) + NVL(q.double_quota_gb,0)     AS allocated_gb,
-           NVL(e.cons_edr_gb,0)                                  AS cons_e,
-           NVL(e.edr_sessions,0)                                 AS edr_sessions
-    FROM   subs s
-    LEFT JOIN quota_agg q ON q.MSISDN = s.MSISDN    -- keeps customers with no PCRF data
-    LEFT JOIN edr_agg   e ON e.MSISDN = s.MSISDN
-)
-
-SELECT MSISDN,
-       BILLCYCLE,
-       cycle_start,
-       cycle_end,
-       TO_CHAR(cycle_end,'YYYY-MM')                                   AS cycle_month,
-       TO_CHAR(cycle_end,'FMMonth YYYY','NLS_DATE_LANGUAGE=ENGLISH')  AS cycle_month_name,
-
-       CASE WHEN main_svc_cnt > 1 THEN 'Yes' ELSE 'No' END            AS service_changed,
-       main_svc_cnt                                                   AS main_services_count,
-       main_services,
-
-       main_last_date                                                 AS main_quota_date,
-       main_quota_gb,
-       CASE WHEN has_double = 1 THEN 'Yes' ELSE 'No' END              AS double_quota,
-       double_last_date                                               AS double_quota_date,
-       double_quota_gb,
-       allocated_gb                                                   AS total_allocated_gb,
-
-       catalogue_quota_gb,
-       CASE WHEN catalogue_quota_gb > 0
-            THEN TRUNC(main_quota_gb / catalogue_quota_gb) END        AS main_quota_renewals,
-
-       edr_sessions,
-       cons_e                                                         AS total_consumed_gb,
-       ROUND(cons_e / NULLIF(allocated_gb,0) * 100, 2)                AS consumption_pct,
-       allocated_gb - cons_e                                          AS variance_gb,
-       ROUND((allocated_gb - cons_e) / NULLIF(allocated_gb,0) * 100, 2) AS variance_pct,
-
-       CASE WHEN allocated_gb = 0 AND cons_e = 0 THEN 'Both not found'
-            WHEN allocated_gb = 0                THEN 'No allocated found'
-            WHEN cons_e = 0                      THEN 'No consumption found'
-            WHEN cons_e >= allocated_gb          THEN 'Finisher'
-            ELSE 'Non-Finisher' END                                   AS finisher_status,
-       CASE WHEN allocated_gb = 0 OR cons_e = 0
-              OR cons_e >= allocated_gb THEN NULL
-            WHEN cons_e / allocated_gb < 0.25 THEN 'CAT1'
-            WHEN cons_e / allocated_gb < 0.50 THEN 'CAT2'
-            WHEN cons_e / allocated_gb < 0.75 THEN 'CAT3'
-            ELSE                                   'CAT4'
-       END                                                            AS consumption_category
-FROM   calc
-ORDER  BY BILLCYCLE, MSISDN;
+Postpaid ADSL Finisher KPI: How the Query Works
+Nov 17, 2026 · @Omar
+Overview
+For every postpaid ADSL customer, the query compares the quota given in their last completed bill cycle with what they consumed, then labels them Finisher or Non-Finisher and puts non-finishers into CAT1 to CAT4.
+It is one chain of CTEs (WITH name AS (...) blocks). Each block is a named temporary result that the next blocks read from, so the query can be read top to bottom, one step at a time.
+ 
+query flow · 6 steps, A to F
+Steps A to C decide whose cycle is measured and when; D and E measure allocated and consumed quota for those customers; F compares them.
+Step A: Find each bill cycle's dates
+The query always measures the last completed cycle of each bill cycle, counted back from a reference date.
+1.	params sets the reference date ref_date = the latest RUN_DATE in PFM_PCRF_CONSUM_FILTERED. In the DuckDB job it is the --run_date parameter.
+2.	cycles lists each bill cycle and the day its cycle ends. 31 means the last day of the month, whatever its length.
+3.	cycle_sel is where you choose which cycles to run.
+4.	cycle_cand works out two possible end dates per cycle: the end day in this month and in the previous month.
+5.	cycle_win keeps this month's end date if it has already passed, otherwise last month's. The start is one month back plus one day; for BC01 it is the 1st of the month.
+6.	bounds takes the earliest start and the latest end of all selected cycles. Later steps use it to filter the big tables first, so they scan only that period.
+Example with ref_date = 2026-11-16:
+Bill cycle	End day	End this month	Already passed?	Cycle measured
+BC01	31 (month end)	30 Nov	No	01 Oct to 31 Oct
+BC02	15	15 Nov	Yes	16 Oct to 15 Nov
+BC04	3	3 Nov	Yes	04 Oct to 03 Nov
+BC07	6	6 Nov	Yes	07 Oct to 06 Nov
+BC09	20	20 Nov	No	21 Sep to 20 Oct
+BC11	10	10 Nov	Yes	11 Oct to 10 Nov
+BC25	24	24 Nov	No	25 Sep to 24 Oct
+Here bounds = 21 Sep to 15 Nov, so about 56 days of data are needed.
+The Oracle query also turns the dates into numbers like 20261016 (cs_num, ce_num), because RUN_DATE in PFM_BSCS_ADSL is a number. In DuckDB this is not needed: RUN_DATE is already a date.
+Step B: Decide which customers count
+A customer is measured only if they were postpaid and active in their own cycle, and never prepaid in it. The filters run in this order:
+1.	bscs_post (billing layer 1): take the daily PFM_BSCS_ADSL rows where TYPE = 'POST', the MSISDN has no CP, and RUN_DATE is inside the window of that customer's own bill cycle. A BC02 customer is checked against the BC02 dates, a BC25 customer against the BC25 dates.
+2.	billing: keep one row per MSISDN.
+o	ROW_NUMBER() OVER (PARTITION BY MSISDN ORDER BY RUN_DATE DESC) with rn = 1 keeps the customer's last row in the period.
+o	MAX(CASE WHEN STATUS = 'ACTIVE' THEN 1 ELSE 0 END) OVER (PARTITION BY MSISDN) is 1 if the customer was ACTIVE on any day. Customers never active are dropped.
+o	Test price groups (TEST PHONES, Pre-paid Test SIM, Test Individuals, Dummy PG) and SDSL tariffs are removed.
+3.	bscs_pre + billing_ok (billing layer 2): if the MSISDN was TYPE = 'PRE' on any day of its own cycle, the whole customer is removed. Prepaid days after the cycle end are ignored.
+NOT EXISTS is an anti-join: keep the customer only when no matching prepaid row exists. It is the safe choice here because it never duplicates rows and behaves correctly with NULLs.
+Step C: Product catalogue and the customer list
+catalogue reads RD_T_DSL_PRODUCT_CATALOGUE and keeps only PROD_TYPE_NAME = 'Main Bundle', without _GC_ services. It gives one row per service name (UPPER(TRIM(...))), with its quota in GB. It has two jobs:
+•	give the catalogue quota, used later to count renewals, and
+•	act as the list of valid PCRF services in Step D.
+The condition UPPER(PCRF_TYPE) = 'POSTPAID' is commented out on purpose, because some postpaid services are listed as prepaid in the catalogue.
+subs is the final customer list: one row per customer from billing_ok, with their bill cycle, cycle dates and catalogue quota. It joins the catalogue on PCRF_SERVICE_NAME_EXPECTED, the service the customer should have according to BSCS.
+It also creates edr_msisdn = SUBSTR(MSISDN, 2): the EDR table stores numbers without the leading 2, so this column is used for the EDR join in Step E.
+Step D: Allocated quota from PCRF
+The allocated quota is the sum of each service's last quota value in the cycle, plus double quota, rounded to whole GB.
+1.	win_rows takes each customer's rows from PFM_PCRF_CONSUM_FILTERED inside their cycle. It removes addon, throttling, promo and _GC_ services, and keeps only services in the Main Bundle catalogue, or double quota by name. Double quota rows get is_double = 1.
+2.	svc_last keeps, for each customer and service, the QUOTA_SUM on the last day the service appears, divided by 1,048,576 (1024 × 1024) to turn KB into GB.
+3.	quota_agg sums the main services and the double quota separately, rounds each to whole GB, counts the main services, and builds the service history text in date order with LISTAGG.
+MAX(QUOTA_SUM) KEEP (DENSE_RANK LAST ORDER BY RUN_DATE) is Oracle for: take QUOTA_SUM from the latest RUN_DATE of the group, and the highest one if that day has several rows.
+Example (invented values) for one customer in BC02, 16 Oct to 15 Nov:
+Service	Days seen	Last quota	is_double
+ADSL_100GB	16 Oct to 25 Oct	100 GB	0
+ADSL_200GB	26 Oct to 15 Nov	200 GB	0
+Double Quota	01 Nov to 15 Nov	200 GB	1
+Result: main_quota_gb = 300, main_svc_cnt = 2 so service_changed = Yes, double_quota_gb = 200, total_allocated_gb = 500, main_services = ADSL_100GB > ADSL_200GB.
+The query sums first and rounds after, so small fractions are not lost on each service.
+Step E: Consumption from EDR
+edr_agg sums every customer's QUOTA_USAGE in PFM_PCRF_EDRS_STG_CONSUM over their cycle, converts it to GB, rounds it, and counts the sessions.
+•	The join uses edr_msisdn (MSISDN without the leading 2).
+•	The time filter is TIME >= cycle_start AND TIME < cycle_end + 1, so the whole last day is included, up to 23:59:59.
+•	It removes addon, throttling, promo, adn, gift and _GC_ services.
+•	Unlike Step D, consumption is not checked against the catalogue: every remaining service counts.
+Step F: Final columns, status and category
+calc joins everything to subs with LEFT JOIN, so customers with no PCRF or EDR data still appear, and NVL(..., 0) turns their missing values into 0. The final SELECT then adds these columns:
+Column	How it is calculated
+cycle_month, cycle_month_name	From cycle_end, e.g. 2026-11 and November 2026
+service_changed	Yes when more than 1 main service appeared in the cycle
+main_quota_renewals	TRUNC(main_quota_gb / catalogue_quota_gb), e.g. 300 ÷ 100 = 3
+total_allocated_gb	Main quota + double quota
+consumption_pct	Consumed ÷ allocated × 100, with NULLIF so 0 allocated gives NULL, not an error
+variance_gb, variance_pct	Allocated − consumed
+ 
+finisher status and category · 4 checks, 5 statuses, 4 categories
+The checks run top to bottom and stop at the first yes. Both values are rounded GB, so 99.6 GB consumed against 100 GB counts as a Finisher.
+Things to check
+1. The _GC_ filter is wider than intended. The comment says \ escapes _, but the query has no \ and no ESCAPE clause. In LIKE, _ means any single character, so '%_GC_%' matches any name with GC and at least one character on each side.
+Service name	Excluded today?	Should it be?
+ADSL_GC_100	Yes	Yes
+BIGCAP_50 (IGCA matches _GC_)	Yes	No
+The fix in Oracle is UPPER(SERVICE_NAME) NOT LIKE '%\_GC\_%' ESCAPE '\', in catalogue, win_rows and edr_agg. In DuckDB it is NOT contains(UPPER(SERVICE_NAME), '_GC_'). Fixing it may bring some services back, so compare the counts before and after. The DuckDB job keeps the current behaviour for now, so its results can be checked against Oracle first.
+2. CAT1 cut-off. The query uses 25% (< 0.25). Earlier the cut-offs were 35%, 50% and 75%. One of them needs confirming.
+3. Rounding before comparing. Allocated and consumed are rounded to whole GB before the Finisher check, so customers within 0.5 GB of their quota can land on either side.
+Converting to DuckDB
+The logic carries over almost line for line. The main change is the data: Oracle keeps history in tables, while the DuckDB job reads one file per day for every day of the period.
+Oracle	DuckDB
+/*+ PARALLEL ... */ hints	Removed: DuckDB runs in parallel by itself
+SELECT '01', 31 FROM dual UNION ALL ...	VALUES ('01', 31), ('02', 15), ...
+MAX(RUN_DATE) as reference date	The --run_date parameter
+TRUNC(d, 'MM')	date_trunc('month', d)
+LAST_DAY(d)	last_day(d)
+ADD_MONTHS(d, -1)	d - INTERVAL 1 MONTH
+TO_NUMBER(TO_CHAR(d, 'YYYYMMDD'))	Not needed: RUN_DATE is a date
+NVL(x, 0)	COALESCE(x, 0)
+MAX(x) KEEP (DENSE_RANK LAST ORDER BY d)	MAX(x) on the rows where d = the latest d (same tie rule)
+LISTAGG(x, ' > ') WITHIN GROUP (ORDER BY d)	string_agg(x, ' > ' ORDER BY d)
+TO_CHAR(d, 'YYYY-MM')	strftime(d, '%Y-%m')
+TO_CHAR(d, 'FMMonth YYYY')	strftime(d, '%B %Y')
+The job postpaid_quota_kpi.py runs these steps, each as its own table so you can inspect it:
+1.	kpi_cycle_win: cycle dates from --run_date and --bill_cycles.
+2.	kpi_bscs: the daily BSCS exports for the period.
+3.	kpi_catalogue and kpi_subs: Steps B and C.
+4.	kpi_win_rows: PCRF quota rows (Step D input).
+5.	kpi_edr_agg: EDR consumption (Step E).
+6.	postpaid_quota_kpi_data: Step F, then the CSV export and SQL*Loader into Oracle, as in the other jobs.
+The job logs any day with no file, and stops if a source has no files at all.
+To confirm before the first run:
+•	☐ File paths for the three daily sources (BSCS export, pcrf_consum, pcrf_edrs)
+•	☐ pcrf_consum is the same data as PFM_PCRF_CONSUM_FILTERED
+•	☐ Daily files are kept for about two months
+•	☐ Format of EDR_DATE in the EDR files
+•	☐ Oracle target table and control file for postpaid_quota_kpi
