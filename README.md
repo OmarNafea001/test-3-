@@ -1,144 +1,300 @@
-# Oracle connection variables
-DB_USER="RP7VFEPIDAT"
-DB_PASS="RP7VFEPIDAT"
-DB_SID="RAIDDB"
+import os 
+import sys 
+ 
+PROJECT_ROOT = os.path.abspath( 
+os.path.join(os.path.dirname(__file__), "..") 
+) 
+sys.path.insert(0, PROJECT_ROOT) 
+ 
+import duckdb 
+import argparse 
+from datetime import datetime, timedelta
+from config.duckdb_connection import duckdb_connection 
+from utils.logger import get_logger 
+from utils.export_to_oracle import prepare_ctl 
+from utils.export_to_oracle import run_sqlldr 
+from utils.dump_vs_database import validate_loaded_data 
+ 
+ 
+ 
+def export_procera_vs_edrs(run_date: str, con=None): 
+ 
+    logger = get_logger( 
+        flow="adsl_procera_vs_edrs", 
+        log_dir=None,   
+        run_date=run_date 
+    ) 
+ 
+ 
+    try: 
+        if con is None: 
+            con = duckdb_connection() 
+     
+ 
+        logger.info(f"################################################################") 
+        logger.info(f"###### ADSL PROCERA VS EDRS for run_date= {run_date} ##############") 
+        logger.info(f"################################################################") 
+ 
+        start_time = datetime.now() 
+        edrs_consum_dump = f"/RAIDdata/PI/PI_PRJ/exports/pcrf_edrs_*"
+        procera_dump = f"/RAIDdata/PI/PI_PRJ/exports/procera_agg_*" 
+ 
+        con.execute(f""" 
+            CREATE OR REPLACE VIEW pcrf_edrs AS 
+            SELECT RUN_DATE,EDR_DATE,TIME,MSISDN,TRIGGER_TYPE,SERVICE_NAME,QUOTA_NAME,QUOTA_STATUS,EXPECTED_ORG_QUOTA,EXPECTED_TAX_QUOTA,QUOTA_CONSUMPTION,QUOTA_USAGE,QUOTA_VALUE,ACTUAL_QUOTA_USAGE,SERVICE_EXTENDED_ATT1,SOURCE_FILENAME
+            FROM read_csv_auto('{edrs_consum_dump}', ignore_errors=True, union_by_name=True) 
+        """) 
 
-# Step 1: Check if QUOTA_NAME_lkp has data for this date
-ROW_COUNT=$($ORACLE_HOME/bin/sqlplus -s "$DB_USER/$DB_PASS@$DB_SID" <<EOF
-SET HEADING OFF FEEDBACK OFF VERIFY OFF ECHO OFF
-SELECT COUNT(*) FROM RP7VFEPIDAT.QUOTA_NAME_lkp
-WHERE "TIME"  = TO_DATE('$1','YYYYMMDD');
-EXIT;
-EOF
+        count = con.execute("SELECT COUNT(*) FROM pcrf_edrs").fetchone()[0] 
+        logger.info(f"Total pcrf processed rows: {count}") 
+ 
+        con.execute(f""" 
+            CREATE OR REPLACE VIEW procera AS 
+            SELECT RUN_DATE,START_DATE,LANDLINE,TOTAL_BYTES,FRAUD_FLAG,PCRF_RESULT_CODE,RULE_MONITORING_KEY,SESSION_ID,CLOSE_CAUSE,PCRF_RULES_LIST            
+            FROM read_csv_auto('{procera_dump}', ignore_errors=True) 
+        """) 
+
+        count = con.execute("SELECT COUNT(*) FROM procera").fetchone()[0] 
+        logger.info(f"Total procera processed rows: {count}") 
+ 
+ 
+        con.execute(f""" 
+       CREATE OR REPLACE TABLE procera_vs_edrs AS
+
+        SELECT
+            RUN_DATE,
+            EDRS_LANDLINE,
+            PROCERA_LANDLINE,
+            ROUND(EDRS_CONSUMPTION, 3) AS EDRS_CONSUMPTION,
+            ROUND(PROCERA_CONSUMPTION, 3) AS PROCERA_CONSUMPTION,
+            ROUND(VARIANCE, 3) AS VARIANCE,
+            ROUND(VARIANCE / NULLIF(PROCERA_CONSUMPTION, 0), 2) AS PERCENTAGE
+        FROM
+        (
+            SELECT
+                COALESCE(PROCERA.START_DATE, EDRS.EDR_DATE) AS RUN_DATE,
+                EDRS.MSISDN AS EDRS_LANDLINE,
+                PROCERA.LANDLINE AS PROCERA_LANDLINE,
+                EDRS.QUOTA_CONSUMPTION AS EDRS_CONSUMPTION,
+                (PROCERA.TOTAL_BYTES / 1024.0) AS PROCERA_CONSUMPTION,
+                (
+                    COALESCE((PROCERA.TOTAL_BYTES / 1024.0), 0)
+                    - COALESCE(EDRS.QUOTA_CONSUMPTION, 0)
+                ) AS VARIANCE
+            FROM
+            (
+                SELECT
+                    EDR_DATE,
+                    MSISDN,
+                    SUM(QUOTA_USAGE) AS QUOTA_CONSUMPTION
+                FROM pcrf_edrs
+                WHERE EDR_DATE = STRPTIME('{run_date}', '%Y%m%d')
+                GROUP BY
+                    EDR_DATE,
+                    MSISDN
+            ) EDRS
+
+            FULL OUTER JOIN
+            (
+                SELECT
+                    START_DATE,
+                    LANDLINE,
+                    SUM(TOTAL_BYTES) AS TOTAL_BYTES
+                FROM procera
+                WHERE START_DATE = STRPTIME('{run_date}', '%Y%m%d')
+                GROUP BY
+                    START_DATE,
+                    LANDLINE
+            ) PROCERA
+
+            ON CAST(EDRS.MSISDN AS VARCHAR) = CAST(PROCERA.LANDLINE AS VARCHAR)
+
+            WHERE
+                (
+                    COALESCE((PROCERA.TOTAL_BYTES / 1024.0), 0)
+                    - COALESCE(EDRS.QUOTA_CONSUMPTION, 0)
+                ) <> 0
+        );
+         """ ) 
+ 
+     
+        count = con.execute("SELECT COUNT(*) FROM procera_vs_edrs").fetchone()[0] 
+        logger.info(f"Total processed rows: {count}") 
+ 
+        logger.info(f"Exporting procera_vs_edrs_{run_date}.csv ..") 
+ 
+        con.execute(f"""COPY procera_vs_edrs TO '/project/PLATFORM_INTEGRITY/exports/procera_vs_edrs_{run_date}.csv' (HEADER, DELIMITER ',')""") 
+        # logger.info(f"Inserting into PI.BSCS_IN_HLR_STATUS_MISMATCH table ..") 
+        # ctl_file = prepare_ctl("bscs_in_hlr_status_mismatch", run_date) 
+        # run_sqlldr("bscs_in_hlr_status_mismatch",run_date, ctl_file=ctl_file) 
+        # logger.info(f"Insertion done") 
+ 
+        # logger.info(f"Validating inserted data ..") 
+        # validate_loaded_data( 
+        # flow_name="bscs_in_hlr_status_mismatch", 
+        # run_date=run_date, 
+        # expected_rows=count, 
+        # logger=logger) 
+        # logger.info("Inserted data validated successfully.") 
+ 
+        end_time = datetime.now() 
+        logger.info(f"procera_vs_edrs_consum job finished") 
+        logger.info(f"procera_vs_edrs_consum total duration: {end_time - start_time}") 
+    except Exception as e: 
+        logger.exception(f"procera_vs_edrs_consum failed for run_date= {run_date} | error= {str(e)}") 
+        raise 
+ 
+ 
+if __name__ == "__main__": 
+    parser = argparse.ArgumentParser() 
+    parser.add_argument("--run_date", required=True) 
+    args = parser.parse_args() 
+    export_procera_vs_edrs(run_date=args.run_date) 
+
+
+
+import os
+import sys
+import argparse
+from datetime import datetime
+
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
 )
+sys.path.insert(0, PROJECT_ROOT)
 
-ROW_COUNT=$(echo "$ROW_COUNT" | xargs)
-
-if [ "$ROW_COUNT" -gt 0 ]; then
-    echo "QUOTA_NAME_LKP already has data for $1. Skipping QUOTA_NAME_lkp.sh..."
-else
-    echo "No data found in QUOTA_NAME_LKP for $1. Running QUOTA_NAME_lkp.sh..."
-    cd /RAIDdata/PI/PCRF_EDRS
-    ./QUOTA_NAME_lkp.sh $1
-fi
-
-# Step 2: Continue with rest of the main script
-$ORACLE_HOME/bin/sqlplus -s > $file_name <<END
-$DB_USER/$DB_PASS@$DB_SID
-
-INSERT INTO RD_T_TE_INVOICE_VALIDATION
-SELECT DISTINCT RUN_DATE,TE_MSISDN,RADIUS_STATUS ,BILLING_STATUS,CHARGING_STATUS,
-(CASE WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='ACTIVE' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist/DEACTIVE'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
-ELSE '_N' END)CASE_COMMENT,Customer_TYPE,PCRF_STATUS,QUOTA.QUOTA_NAME,te.te_speed AS TE_SPEED,
-REGEXP_SUBSTR(QUOTA.QUOTA_NAME,'[0-9]+M', 1, 1) AS speed
-FROM(
-SELECT DISTINCT TE.RUN_DATE, TE.MSISDN TE_MSISDN, NVL(UPPER(DECODE(RADIUS.STATUS,'0','DeActive','1','Active','2','Suspended',RADIUS.STATUS)), 'Not_Exist') RADIUS_STATUS ,
-NVL(BSCS.STATUS, 'Not_Exist') BILLING_STATUS, NVl(UPPER(CHARGING.STATUS), 'Not_Exist') CHARGING_STATUS,BSCS.TYPE AS Customer_TYPE,TE.te_speed,
-UPPER(DECODE(PCRF.Customer_STATUS,0,'DeActive',1,'Active',2,'Suspended',3,'On-Hold', PCRF.Customer_STATUS)) PCRF_STATUS
-FROM RP7VFEPIDAT.RD_T_TE_DATA_BASE_HISTORICAL  TE
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_BSCS_ADSL WHERE run_date = to_number('$1')) BSCS
-ON TE.MSISDN = BSCS.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_PCRF_FILTERED WHERE RUN_DATE = to_date('$1','YYYYMMDD')) PCRF
-ON TE.MSISDN = PCRF.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_RADIUS WHERE run_date = to_number('$1')) RADIUS
-ON TE.MSISDN = RADIUS.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL where (PACKAGE_TYPE ='DSL Status') AND run_date = to_date('$1','YYYYMMDD')) CHARGING
-ON TE.MSISDN = CHARGING.MSISDN
-)TE
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.QUOTA_NAME_LKP qnl WHERE Time =to_date('$1','YYYYMMDD')) QUOTA
-ON TE_MSISDN = QUOTA.MSISDN
-WHERE run_date = to_date('$1','YYYYMMDD');
-
-COMMIT;
---------------------------------Then
-$ORACLE_HOME/bin/sqlplus -s <<END
-RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
-
-UPDATE  RP7VFEPIDAT.RD_T_TE_INVOICE_VALIDATION rttiv
-SET CUSTOMER_TYPE ='NA'
-WHERE CUSTOMER_TYPE IS NULL;
-
-COMMIT;
-EXIT;
-END;
+from config.duckdb_connection import duckdb_connection
+from utils.logger import get_logger
+from utils.send_mail import send_mail
+from utils.export_to_oracle import prepare_ctl
+from utils.export_to_oracle import run_sqlldr
+from utils.dump_vs_database import validate_loaded_data
 
 
+def load_solarwinds(run_date: str, con=None):
+
+    start_time = datetime.now()
+    logger = get_logger(
+        flow="solarwinds",
+        log_dir=None,
+        run_date=run_date
+    )
+
+    try:
+        if con is None:
+            con = duckdb_connection()
+
+        solarwinds_date = f"{run_date[:4]}_{run_date[4:6]}_{run_date[6:]}"
+        csv_path = f"/project/PLATFORM_INTEGRITY/exports/solarwinds_{run_date}.csv"
+        file_path = f"/RAIDdata/PI/SOLARWINDS/out/{solarwinds_date}_*mod*"
+
+        con.execute(f"""
+            CREATE OR REPLACE TABLE solarwinds_data AS
+            SELECT
+                CAST("Timestamp" AS VARCHAR) AS RUN_DATE,
+
+                TRIM("BNG Name") AS BNG_NAME,
+
+                '_N' AS LAG,
+
+                regexp_extract(filename, '[^/]+$') AS FILE_NAME,
+
+                TRY_CAST(
+                    regexp_extract(TRIM("Total Bytes Received"), '^([^.]*)')
+                    AS BIGINT
+                ) AS RECEIVED_VOLUME,
+
+                TRY_CAST(
+                    regexp_extract(TRIM("Total Bytes Transmitted"), '^([^.]*)')
+                    AS BIGINT
+                ) AS TRANSMITTED_VOLUME,
+
+                TRY_CAST(
+                    regexp_extract(TRIM("Total Bytes (Transmitted + Received)"), '^([^.]*)')
+                    AS BIGINT
+                ) AS TOTAL_VOLUME
+
+            FROM read_csv_auto(
+                '{file_path}',
+                delim=',',
+                header=TRUE,
+                filename=TRUE,
+                ignore_errors=TRUE,
+                dateformat='%m/%d/%Y'
+            );
+        """)
+
+        count = con.execute("SELECT COUNT(*) FROM solarwinds_data").fetchone()[0]
+        logger.info(f"Total processed rows: {count}")
+
+        if count == 0:
+            logger.info("No solarwinds data processed!")
+            raise ValueError(f"No solarwinds data processed for run_date={run_date}")
+
+        con.execute(f"""
+            COPY (
+                SELECT RUN_DATE, BNG_NAME, LAG, FILE_NAME,
+                       RECEIVED_VOLUME, TRANSMITTED_VOLUME, TOTAL_VOLUME
+                FROM solarwinds_data
+            )
+            TO '{csv_path}'
+            (DELIMITER ',', HEADER TRUE);
+        """)
+
+#        logger.info("Inserting into PI.SOLARWINDS table ..")
+#        ctl_file = prepare_ctl("solarwinds", run_date)
+#        run_sqlldr("solarwinds", run_date, ctl_file=ctl_file)
+#        logger.info("Insertion done")
+#
+#        logger.info("Validating inserted data ..")
+#        validate_loaded_data(
+#            flow_name="solarwinds",
+#            run_date=run_date,
+#            expected_rows=count,
+#            logger=logger
+#        )
+#        logger.info("Inserted data validated successfully.")
+#
+#        end_time = datetime.now()
+#        logger.info("solarwinds finished")
+#        logger.info(f"Total duration: {end_time - start_time}")
+#
+#        send_mail(
+#            subject="SOLARWINDS Flow Finished",
+#            content=f"""
+#Run Date      : {run_date}
+#Rows          : {count}
+#DB Validation : Passed
+#Duration      : {end_time - start_time}
+#"""
+#        )
+#
+#        return con.table("solarwinds_data")
+
+    except Exception as e:
+#       logger.exception(f"SOLARWINDS failed for run_date= {run_date} | error= {str(e)}")
+#        send_mail(
+#            subject="SOLARWINDS Flow Failed",
+#            content=f"""
+#Run Date : {run_date}
+#Error:
+#{str(e)}
+#"""
+#        )
+        raise
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run_date", required=True)
+    args = parser.parse_args()
+    load_solarwinds(run_date=args.run_date)
 
 
 
+    I WANT TO BUILD LOOKUP JUST LIKE THE ABOVE QUERIES 
+    AND THE VALIDATION AS WELL 
+    JUST ONE THING TO ADD TRIGGER THE LOOKUP IN THE EXPORTS     project/flow  first then read the files from exports as thers ok do u need anything fro me now?
 
 
 
-
-
-
-
-
-
-
-
-LOOKUP: QUOTA_NAME_lkp
--------------------------------------------------
-RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
-INSERT INTO QUOTA_NAME_lkp (TIME,MSISDN, QUOTA_NAME,SOURCE )
-SELECT  /*+ PARALLEL(16) */ TIME,msisdn,QUOTA_NAME, SOURCE
-FROM(
-SELECT /*+ PARALLEL(16) */
-TO_DATE($1,'YYYYMMDD') AS TIME,msisdn, SERVICE_NAME AS QUOTA_NAME, SOURCE,
-row_number() over(PARTITION BY msisdn ORDER BY run_date desc ) r
-FROM (SELECT TO_DATE(to_Char(RUN_DATE),'YYYYMMDD') run_Date,msisdn,PCRF_SERVICE_NAME_EXPECTED  SERVICE_NAME ,
-'BSCS' AS Source
-FROM RP7VFEPIDAT.PFM_BSCS_ADSL pba
-WHERE RUN_DATE =$1
-AND "TYPE" ='POST'
-AND TMCODE_DES  NOT LIKE 'SDSL%'
-AND TMCODE_DES  NOT LIKE 'Cloud%'
-UNION
-SELECT run_date,msisdn,PCRF_SERVICE_ID_EXPECTED SERVICE_NAME,'IN' AS Source
-FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL rtiah
-WHERE  RUN_DATE = TO_DATE($1,'YYYYMMDD')
-AND PACKAGE_TYPE ='Main Bundle'
-UNION
-SELECT /*+ PARALLEL(16) */
-TO_DATE($1,'YYYYMMDD') AS Run_Date,MSISDN,SERVICE_NAME, 'PCRF' AS Source
-FROM (SELECT /*+ PARALLEL(16) */
-MSISDN,BILL_CYCLE,SERVICE_NAME,SVCPKG_NAME,
-VALID_DATE,EXPIRY_DATE,QUOTA_STATUS,RUN_DATE,CUSTOMER_STATUS,THROT_FLAG,PACKAGE_TYPE,
-ROW_NUMBER () OVER (PARTITION BY MSISDN ORDER BY RUN_DATE DESC) r
-FROM RP7VFEPIDAT.PFM_PCRF pp
-WHERE run_date <=  $1
- AND PACKAGE_TYPE ='Main Bundle'
- AND SERVICE_NAME <> 'Serv_DSL_Generic_Promo'
- AND SERVICE_NAME <> 'Serv_DSL_Compensation_Gift'
- AND SERVICE_NAME <> 'Serv_DSL_Throttling'
- AND SERVICE_NAME <> 'ADSL_OnHold'
- AND SERVICE_NAME <> 'Serv_DSL_Double_Quota_Pre'
- AND SERVICE_NAME NOT LIKE  '%Add%'
- AND SERVICE_NAME NOT LIKE  '%DoubleQuota%')
-WHERE r =1))
-WHERE r =1;
-Commit;
-exit;
-END
-
-
-if i want to apply the above as duck db loke we used to do? how to do it give me sugeestions 
