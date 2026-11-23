@@ -31,6 +31,19 @@ _quota_lkp = _load_quota_lkp()
 export_quota_lkp = _quota_lkp.export_quota_lkp
 HISTORY_DIR = _quota_lkp.HISTORY_DIR
 
+
+def _load_te_missing_speed():
+    if not os.path.exists(TE_MISSING_SPEED_SCRIPT):
+        raise FileNotFoundError(f"Missing speed flow not found: {TE_MISSING_SPEED_SCRIPT}")
+    spec = importlib.util.spec_from_file_location("te_missing_speed", TE_MISSING_SPEED_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_te_missing_speed = _load_te_missing_speed()
+export_te_missing_speed = _te_missing_speed.export_te_missing_speed
+
 EXPORTS = "/project/PLATFORM_INTEGRITY/exports"
 
 
@@ -214,6 +227,13 @@ def export_te_invoice_validation(run_date: str, con=None):
 
         logger.info(f"Exporting te_invoice_validation_{run_date}.csv ..")
         con.execute(f"""COPY te_invoice_validation TO '{EXPORTS}/te_invoice_validation_{run_date}.csv' (HEADER, DELIMITER ',')""")
+
+        # ---------------------------------------------------------------
+        # 4. Trigger the missing-speed flow AFTER the validation file is exported
+        #    (it reads exports/te_invoice_validation_{run_date}.csv)
+        # ---------------------------------------------------------------
+        logger.info("Running te_missing_speed flow ..")
+        export_te_missing_speed(run_date, con=con)
 
         #logger.info("Inserting into RD_T_TE_INVOICE_VALIDATION table ..")
         #ctl_file = prepare_ctl("te_invoice_validation", run_date)
