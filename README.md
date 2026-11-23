@@ -1,201 +1,144 @@
-import os
-import sys
-import argparse
-from datetime import datetime, timedelta
+# Oracle connection variables
+DB_USER="RP7VFEPIDAT"
+DB_PASS="RP7VFEPIDAT"
+DB_SID="RAIDDB"
 
-PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..")
+# Step 1: Check if QUOTA_NAME_lkp has data for this date
+ROW_COUNT=$($ORACLE_HOME/bin/sqlplus -s "$DB_USER/$DB_PASS@$DB_SID" <<EOF
+SET HEADING OFF FEEDBACK OFF VERIFY OFF ECHO OFF
+SELECT COUNT(*) FROM RP7VFEPIDAT.QUOTA_NAME_lkp
+WHERE "TIME"  = TO_DATE('$1','YYYYMMDD');
+EXIT;
+EOF
 )
-sys.path.insert(0, PROJECT_ROOT)
 
-from config.duckdb_connection import duckdb_connection
-from utils.logger import get_logger
-from utils.send_mail import send_mail
-from utils.export_to_oracle import prepare_ctl
-from utils.export_to_oracle import run_sqlldr
-from utils.dump_vs_database import validate_loaded_data
+ROW_COUNT=$(echo "$ROW_COUNT" | xargs)
 
+if [ "$ROW_COUNT" -gt 0 ]; then
+    echo "QUOTA_NAME_LKP already has data for $1. Skipping QUOTA_NAME_lkp.sh..."
+else
+    echo "No data found in QUOTA_NAME_LKP for $1. Running QUOTA_NAME_lkp.sh..."
+    cd /RAIDdata/PI/PCRF_EDRS
+    ./QUOTA_NAME_lkp.sh $1
+fi
 
-def load_procera(run_date: str, con=None):
+# Step 2: Continue with rest of the main script
+$ORACLE_HOME/bin/sqlplus -s > $file_name <<END
+$DB_USER/$DB_PASS@$DB_SID
 
-    logger = get_logger(
-        flow="procera",
-        log_dir=None,
-        run_date=run_date
-    )
+INSERT INTO RD_T_TE_INVOICE_VALIDATION
+SELECT DISTINCT RUN_DATE,TE_MSISDN,RADIUS_STATUS ,BILLING_STATUS,CHARGING_STATUS,
+(CASE WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'ACTIVE'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='ACTIVE' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist/DEACTIVE'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
+WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
+ELSE '_N' END)CASE_COMMENT,Customer_TYPE,PCRF_STATUS,QUOTA.QUOTA_NAME,te.te_speed AS TE_SPEED,
+REGEXP_SUBSTR(QUOTA.QUOTA_NAME,'[0-9]+M', 1, 1) AS speed
+FROM(
+SELECT DISTINCT TE.RUN_DATE, TE.MSISDN TE_MSISDN, NVL(UPPER(DECODE(RADIUS.STATUS,'0','DeActive','1','Active','2','Suspended',RADIUS.STATUS)), 'Not_Exist') RADIUS_STATUS ,
+NVL(BSCS.STATUS, 'Not_Exist') BILLING_STATUS, NVl(UPPER(CHARGING.STATUS), 'Not_Exist') CHARGING_STATUS,BSCS.TYPE AS Customer_TYPE,TE.te_speed,
+UPPER(DECODE(PCRF.Customer_STATUS,0,'DeActive',1,'Active',2,'Suspended',3,'On-Hold', PCRF.Customer_STATUS)) PCRF_STATUS
+FROM RP7VFEPIDAT.RD_T_TE_DATA_BASE_HISTORICAL  TE
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_BSCS_ADSL WHERE run_date = to_number('$1')) BSCS
+ON TE.MSISDN = BSCS.MSISDN
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_PCRF_FILTERED WHERE RUN_DATE = to_date('$1','YYYYMMDD')) PCRF
+ON TE.MSISDN = PCRF.MSISDN
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_RADIUS WHERE run_date = to_number('$1')) RADIUS
+ON TE.MSISDN = RADIUS.MSISDN
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL where (PACKAGE_TYPE ='DSL Status') AND run_date = to_date('$1','YYYYMMDD')) CHARGING
+ON TE.MSISDN = CHARGING.MSISDN
+)TE
+LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.QUOTA_NAME_LKP qnl WHERE Time =to_date('$1','YYYYMMDD')) QUOTA
+ON TE_MSISDN = QUOTA.MSISDN
+WHERE run_date = to_date('$1','YYYYMMDD');
 
-    try:
-        if con is None:
-            con = duckdb_connection()
+COMMIT;
+--------------------------------Then
+$ORACLE_HOME/bin/sqlplus -s <<END
+RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
 
-        start_time = datetime.now()
-        data_dt = datetime.strptime(run_date, '%Y%m%d') - timedelta(days=1)   # fails fast on a bad --run_date
-        data_day = data_dt.strftime('%Y-%m-%d')                 # day the file covers = run_date - 1
-        data_date = data_dt.strftime('%Y%m%d')                 # used for file names, sqlldr and validation
-        file_path = f"/RAIDdata/PI/PROCERA_CDR/raw/PROCERA_FIXED_CDRS_DATA_{data_date}.csv"
-        agg_path = "/RAIDdata/PI/PI_PRJ/exports/procera*"
-        output_path = f"/project/PLATFORM_INTEGRITY/exports/procera_{data_date}.csv"
-        agg_output_path = f"/project/PLATFORM_INTEGRITY/exports/procera_agg_{data_date}.csv"
+UPDATE  RP7VFEPIDAT.RD_T_TE_INVOICE_VALIDATION rttiv
+SET CUSTOMER_TYPE ='NA'
+WHERE CUSTOMER_TYPE IS NULL;
 
-        # Row-level staging: one row per CDR line (no aggregates here).
-        con.execute(f"""
-            CREATE OR REPLACE TABLE procera AS
-            SELECT
-                DATE '{data_day}'                               AS RUN_DATE,
-                TRIM(src.column6)                               AS START_DATE,
-                '2' || TRIM(src.column7)                        AS LANDLINE,
-                TRY_CAST(src.column4 AS DOUBLE)                 AS TOTAL_BYTES,
-                src.column0                                     AS FRAUD_FLAG,
-                src.column1                                     AS PCRF_RESULT_CODE,
-                src.column2                                     AS RULE_MONITORING_KEY,
-                src.column3                                     AS SESSION_ID,
-                src.column5                                     AS CLOSE_CAUSE,
-                src.column8                                     AS PCRF_RULES_LIST,
-                regexp_extract(src.filename, '[^/]+$')          AS SOURCE_FILENAME
-            FROM read_csv_auto(
-                '{file_path}',
-                delim = ',',
-                header = false,
-                all_varchar = true,
-                filename = true,
-                ignore_errors = true
-            ) src
-            WHERE src.column7 IS NOT NULL
-              AND TRIM(src.column7) <> 'Subscriber_ID'
-        """)
-
-        procera_count = con.execute("SELECT COUNT(*) FROM procera").fetchone()[0]
-        logger.info(f"Total processed rows of procera : {procera_count}")
-
-        if procera_count == 0:
-            raise ValueError("No procera data processed!")
-
-        # Daily procera (like the first version): today's file only, START_DATE cut to the day
-        con.execute("""
-            CREATE OR REPLACE TABLE procera_daily AS
-            SELECT
-                RUN_DATE,
-                SUBSTRING(START_DATE, 1, 10)    AS START_DATE,
-                LANDLINE,
-                SUM(TOTAL_BYTES)                AS TOTAL_BYTES,
-                FRAUD_FLAG,
-                PCRF_RESULT_CODE,
-                RULE_MONITORING_KEY,
-                SESSION_ID,
-                CLOSE_CAUSE,
-                PCRF_RULES_LIST
-            FROM procera
-            GROUP BY ALL
-        """)
-
-        procera_daily_count = con.execute("SELECT COUNT(*) FROM procera_daily").fetchone()[0]
-        logger.info(f"Total processed rows of procera_daily : {procera_daily_count}")
-
-        # Export it first, so the aggregate can read it
-        con.execute(f"""
-            COPY (SELECT * FROM procera_daily)
-            TO '{output_path}'
-            (DELIMITER ',', HEADER TRUE)
-        """)
-
-        # Daily aggregate (= RD_T_PROCERA_HISTORICAL_AGG): today's procera export + old CDRs,
-        # only sessions that started on data_day, START_DATE cut to the day.
-        con.execute(f"""
-            CREATE OR REPLACE TABLE procera_historical_agg AS
-            SELECT
-                DATE '{data_day}'               AS RUN_DATE,
-                SUBSTRING(START_DATE, 1, 10)    AS START_DATE,
-                LANDLINE,
-                SUM(TRY_CAST(TOTAL_BYTES AS DOUBLE)) AS TOTAL_BYTES,
-                FRAUD_FLAG,
-                PCRF_RESULT_CODE,
-                RULE_MONITORING_KEY,
-                SESSION_ID,
-                CLOSE_CAUSE,
-                PCRF_RULES_LIST
-            FROM read_csv_auto(
-                ['{output_path}', '{agg_path}'],
-                delim = ',',
-                header = true,
-                all_varchar = true,
-                union_by_name = true,
-                ignore_errors = true
-            )
-            WHERE SUBSTRING(START_DATE, 1, 10) = '{data_day}'
-            GROUP BY ALL
-        """)
-
-        agg_count = con.execute("SELECT COUNT(*) FROM procera_historical_agg").fetchone()[0]
-        logger.info(f"Total processed rows of procera_historical_agg : {agg_count}")
-
-        if agg_count == 0:
-            raise ValueError("No procera_historical_agg data processed!")
-
-        con.execute(f"""
-            COPY (SELECT * FROM procera_historical_agg)
-            TO '{agg_output_path}'
-            (DELIMITER ',', HEADER TRUE)
-        """)
-
-        # Load procera
-        logger.info("Inserting into PI.PROCERA table ..")
-        ctl_file = prepare_ctl("procera", data_date)
-        run_sqlldr("procera", data_date, ctl_file=ctl_file)
-        logger.info("Insertion done")
-
-        logger.info("Validating inserted data ..")
-        validate_loaded_data(
-            flow_name="procera",
-            run_date=data_date,
-            expected_rows=procera_daily_count,
-            logger=logger)
-        logger.info("Inserted data validated successfully.")
-
-        # Load procera_agg
-        logger.info("Inserting into PI.PROCERA_AGG table ..")
-        ctl_file = prepare_ctl("procera_agg", data_date)
-        run_sqlldr("procera_agg", data_date, ctl_file=ctl_file)
-        logger.info("Insertion done")
-
-        logger.info("Validating inserted data ..")
-        validate_loaded_data(
-            flow_name="procera_agg",
-            run_date=data_date,
-            expected_rows=agg_count,
-            logger=logger)
-        logger.info("Inserted data validated successfully.")
-
-        end_time = datetime.now()
-        logger.info("procera job finished")
-        logger.info(f"procera total duration: {end_time - start_time}")
-        send_mail(
-            subject="procera Flow Finished",
-            content=f"""
-                Run Date      : {run_date}
-                Data Date     : {data_date}
-                Procera Rows  : {procera_daily_count}
-                Agg Rows      : {agg_count}
-                DB Validation : Passed
-                Duration      : {end_time - start_time}""")
-
-        return con.table("procera")
-
-    except Exception as e:
-        logger.exception(
-            f"procera failed for run_date={run_date} | error={str(e)}"
-        )
-        send_mail(
-            subject="procera Flow Failed",
-            content=f"""
-                Run Date : {run_date}
-                Error:
-                {str(e)}""")
-        raise
+COMMIT;
+EXIT;
+END;
 
 
-if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run_date", required=True, help="YYYYMMDD")
-    args = parser.parse_args()
-    load_procera(run_date=args.run_date)
+
+
+
+
+
+
+
+
+
+
+
+
+
+LOOKUP: QUOTA_NAME_lkp
+-------------------------------------------------
+RP7VFEPIDAT/RP7VFEPIDAT@RAIDDB
+INSERT INTO QUOTA_NAME_lkp (TIME,MSISDN, QUOTA_NAME,SOURCE )
+SELECT  /*+ PARALLEL(16) */ TIME,msisdn,QUOTA_NAME, SOURCE
+FROM(
+SELECT /*+ PARALLEL(16) */
+TO_DATE($1,'YYYYMMDD') AS TIME,msisdn, SERVICE_NAME AS QUOTA_NAME, SOURCE,
+row_number() over(PARTITION BY msisdn ORDER BY run_date desc ) r
+FROM (SELECT TO_DATE(to_Char(RUN_DATE),'YYYYMMDD') run_Date,msisdn,PCRF_SERVICE_NAME_EXPECTED  SERVICE_NAME ,
+'BSCS' AS Source
+FROM RP7VFEPIDAT.PFM_BSCS_ADSL pba
+WHERE RUN_DATE =$1
+AND "TYPE" ='POST'
+AND TMCODE_DES  NOT LIKE 'SDSL%'
+AND TMCODE_DES  NOT LIKE 'Cloud%'
+UNION
+SELECT run_date,msisdn,PCRF_SERVICE_ID_EXPECTED SERVICE_NAME,'IN' AS Source
+FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL rtiah
+WHERE  RUN_DATE = TO_DATE($1,'YYYYMMDD')
+AND PACKAGE_TYPE ='Main Bundle'
+UNION
+SELECT /*+ PARALLEL(16) */
+TO_DATE($1,'YYYYMMDD') AS Run_Date,MSISDN,SERVICE_NAME, 'PCRF' AS Source
+FROM (SELECT /*+ PARALLEL(16) */
+MSISDN,BILL_CYCLE,SERVICE_NAME,SVCPKG_NAME,
+VALID_DATE,EXPIRY_DATE,QUOTA_STATUS,RUN_DATE,CUSTOMER_STATUS,THROT_FLAG,PACKAGE_TYPE,
+ROW_NUMBER () OVER (PARTITION BY MSISDN ORDER BY RUN_DATE DESC) r
+FROM RP7VFEPIDAT.PFM_PCRF pp
+WHERE run_date <=  $1
+ AND PACKAGE_TYPE ='Main Bundle'
+ AND SERVICE_NAME <> 'Serv_DSL_Generic_Promo'
+ AND SERVICE_NAME <> 'Serv_DSL_Compensation_Gift'
+ AND SERVICE_NAME <> 'Serv_DSL_Throttling'
+ AND SERVICE_NAME <> 'ADSL_OnHold'
+ AND SERVICE_NAME <> 'Serv_DSL_Double_Quota_Pre'
+ AND SERVICE_NAME NOT LIKE  '%Add%'
+ AND SERVICE_NAME NOT LIKE  '%DoubleQuota%')
+WHERE r =1))
+WHERE r =1;
+Commit;
+exit;
+END
+
+
+if i want to apply the above as duck db loke we used to do? how to do it give me sugeestions 
